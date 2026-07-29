@@ -1,0 +1,52 @@
+# GRPO 示例配置 — Qwen2.5-1.5B + GSM8K 规则奖励,24G 单卡
+# 用法: onlyone train-grpo --config configs/grpo.yaml
+# 前置: 先跑过 SFT(configs/sft.yaml),GRPO 的 reference 是 SFT 后策略
+model:
+  name_or_path: Qwen/Qwen2.5-1.5B
+  dtype: bf16
+  attn_implementation: sdpa   # Linux 上可换 flash_attention_2
+  load_in_4bit: false
+  use_lora: true
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+
+data:
+  train_path: data/sft_example.jsonl   # GRPO 自产数据,此字段仅为满足 schema
+  template: chatml
+  max_len: 1024          # prompt+completion 截断长度
+  packing: false
+
+train:
+  output_dir: runs/grpo_qwen15b
+  per_device_batch_size: 1   # GRPO 不用此字段(batch = prompts_per_step × G)
+  gradient_accumulation_steps: 1
+  lr: 1.0e-6             # RL 学习率要比 SFT 小一个量级
+  warmup_ratio: 0.05
+  max_steps: 200
+  gradient_checkpointing: true
+  logging_steps: 5
+  save_steps: 50
+  seed: 42
+  log_with: none
+  run_name: grpo-qwen15b
+
+algo:
+  name: grpo
+
+grpo:
+  prompts_path: data/prompts_example.jsonl
+  group_size: 4            # G=4:24G 卡的安全起点;显存宽裕可升 8
+  prompts_per_step: 8      # 每步 8 个 prompt × 4 候选 = 32 条序列
+  rewards: [math_answer, length]
+
+  clip_eps: 0.2
+  kl_beta: 0.04
+  kl_circuit_breaker: 0.5  # KL 超过 0.5 立即熔断保存(0 关闭)
+
+  max_new_tokens: 256
+  temperature: 0.9         # 组内多样性:候选必须有 reward 方差
+  top_p: 0.95
+  rollout_batch_size: 8
+  engine: hf               # 先跑通;Linux 上换 vllm 提速 3~10x
+  vllm_gpu_mem_util: 0.35
