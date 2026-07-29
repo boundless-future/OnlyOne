@@ -1,0 +1,31 @@
+# SFT 示例配置 — Qwen2.5-1.5B，24G 单卡可跑
+# 用法: onlyone train --config configs/sft.yaml
+model:
+  name_or_path: Qwen/Qwen2.5-1.5B
+  dtype: bf16
+  attn_implementation: sdpa   # Linux 上可换 flash_attention_2
+  load_in_4bit: false
+  use_lora: true
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+
+data:
+  train_path: data/sft_example.jsonl
+  template: chatml            # Qwen 系列即 ChatML
+  max_len: 2048
+  packing: true               # SFT 专用：减少 padding 浪费
+
+train:
+  output_dir: runs/sft_qwen15b
+  per_device_batch_size: 2
+  gradient_accumulation_steps: 8
+  lr: 1.0e-5
+  warmup_ratio: 0.03
+  max_steps: 1000
+  gradient_checkpointing: true
+  logging_steps: 10
+  save_steps: 500
+  seed: 42
+  log_with: none              # 可换 wandb / tensorboard
+  run_name: sft-qwen15b

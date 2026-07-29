@@ -1,0 +1,99 @@
+"""Pydantic-based configuration: YAML -> validated dataclass-like models.
+
+Design rules:
+- Every trainer has its own config section; shared sections (model/data/train)
+  are composed rather than duplicated.
+- Unknown YAML keys are rejected (extra="forbid") so typos fail fast.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Literal, Optional
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class _Base(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ModelConfig(_Base):
+    """Backbone loading and LoRA setup."""
+
+    name_or_path: str
+    dtype: Literal["bf16", "fp16", "fp32"] = "bf16"
+    attn_implementation: Literal["flash_attention_2", "sdpa", "eager"] = "sdpa"
+    load_in_4bit: bool = False  # QLoRA path (requires bitsandbytes, Linux)
+    trust_remote_code: bool = False
+
+    use_lora: bool = True
+    lora_r: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.05
+    lora_target_modules: list[str] = Field(
+        default_factory=lambda: [
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ]
+    )
+
+
+class DataConfig(_Base):
+    """Dataset source and preprocessing."""
+
+    train_path: str  # jsonl
+    eval_path: Optional[str] = None
+    template: str = "chatml"  # see onlyone.data.templates
+    max_len: int = 2048
+    # SFT-only: concatenate multiple samples into one max_len sequence.
+    # Must stay False for preference/RL trainers (pairs cannot be packed).
+    packing: bool = False
+    num_workers: int = 4
+
+
+class TrainConfig(_Base):
+    """Optimization loop, shared by all trainers."""
+
+    output_dir: str = "runs/sft"
+    per_device_batch_size: int = 4
+    gradient_accumulation_steps: int = 4
+    lr: float = 1e-5
+    weight_decay: float = 0.0
+    warmup_ratio: float = 0.03
+    max_steps: int = 1000
+    gradient_checkpointing: bool = True
+    max_grad_norm: float = 1.0
+    seed: int = 42
+
+    logging_steps: int = 10
+    save_steps: int = 500
+    eval_steps: Optional[int] = None
+    resume_from: Optional[str] = None
+
+    log_with: Literal["none", "wandb", "tensorboard"] = "none"
+    run_name: Optional[str] = None
+    # "auto" = cuda if available else cpu; set explicitly in tests / debug.
+    device: str = "auto"
+
+
+class SFTConfig(_Base):
+    """Root config for the SFT trainer."""
+
+    model: ModelConfig
+    data: DataConfig
+    train: TrainConfig
+
+    @model_validator(mode="after")
+    def _check_4bit_needs_lora(self):
+        if self.model.load_in_4bit and not self.model.use_lora:
+            raise ValueError("4bit 量化只能配合 LoRA 训练（QLoRA）")
+        return self
+
+
+def load_config(path: str | Path) -> SFTConfig:
+    """Load and validate a YAML config file."""
+    with open(path, "r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f)
+    return SFTConfig.model_validate(raw)

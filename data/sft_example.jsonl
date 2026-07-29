@@ -1,0 +1,8 @@
+{"prompt": "3+5 等于多少？", "completion": "3+5=8"}
+{"prompt": "用一句话解释什么是递归。", "completion": "递归是函数在执行过程中调用自身的编程技巧，需要明确的终止条件。"}
+{"prompt": "把 'hello world' 翻译成中文。", "completion": "你好，世界"}
+{"prompt": "列出三个质数。", "completion": "2、3、5 都是质数。"}
+{"prompt": "1 到 10 的和是多少？", "completion": "1+2+...+10=55"}
+{"prompt": "写一句关于春天的诗。", "completion": "春风又绿江南岸，明月何时照我还。"}
+{"prompt": "Python 中如何反转一个列表？", "completion": "可以使用切片 my_list[::-1] 或 my_list.reverse() 方法。"}
+{"prompt": "12 乘以 12 等于多少？", "completion": "12×12=144"}
