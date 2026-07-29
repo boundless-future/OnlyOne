@@ -8,36 +8,8 @@ from __future__ import annotations
 
 import json
 
-import pytest
 import torch
 import yaml
-
-
-@pytest.fixture(scope="module")
-def tiny_model_dir(tmp_path_factory):
-    from tokenizers import Tokenizer, models, pre_tokenizers
-    from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
-
-    d = tmp_path_factory.mktemp("tiny_model")
-
-    torch.manual_seed(0)
-    model = LlamaForCausalLM(LlamaConfig(
-        vocab_size=128, hidden_size=32, intermediate_size=64,
-        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4,
-        max_position_embeddings=128,
-    ))
-    model.save_pretrained(d)
-
-    tok = Tokenizer(models.WordLevel(
-        vocab={"<pad>": 0, "<eos>": 1} | {f"w{i}": i + 2 for i in range(125)},
-        unk_token="<eos>",
-    ))
-    tok.pre_tokenizer = pre_tokenizers.Whitespace()
-    fast = PreTrainedTokenizerFast(
-        tokenizer_object=tok, pad_token="<pad>", eos_token="<eos>"
-    )
-    fast.save_pretrained(d)
-    return str(d)
 
 
 def test_cli_train_end_to_end(tiny_model_dir, tmp_path):

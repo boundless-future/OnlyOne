@@ -1,0 +1,8 @@
+{"prompt": "3+5 等于多少？", "completion": "3+5=8", "label": true}
+{"prompt": "3+5 等于多少？", "completion": "3+5=9", "label": false}
+{"prompt": "10 的一半是多少？", "completion": "10 的一半是 5。", "label": true}
+{"prompt": "10 的一半是多少？", "completion": "10 的一半是 2。", "label": false}
+{"prompt": "把 'apple' 翻译成中文。", "completion": "苹果", "label": true}
+{"prompt": "把 'apple' 翻译成中文。", "completion": "香蕉", "label": false}
+{"prompt": "12 乘以 3 等于多少？", "completion": "12×3=36", "label": true}
+{"prompt": "12 乘以 3 等于多少？", "completion": "12×3=15", "label": false}

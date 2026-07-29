@@ -62,3 +62,35 @@ def make_batch(batch_size: int = 3, seq: int = SEQ, n_completion: int = 5):
     labels = input_ids.clone()
     labels[:, : seq - n_completion] = -100
     return input_ids, attention_mask, labels
+
+
+@pytest.fixture(scope="module")
+def tiny_model_dir(tmp_path_factory):
+    """Self-contained tiny model + tokenizer directory on disk (no downloads).
+
+    Used by end-to-end tests that exercise the real loading path
+    (AutoModelForCausalLM.from_pretrained / AutoTokenizer.from_pretrained).
+    """
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from transformers import PreTrainedTokenizerFast
+
+    d = tmp_path_factory.mktemp("tiny_model")
+
+    torch.manual_seed(0)
+    model = LlamaForCausalLM(LlamaConfig(
+        vocab_size=128, hidden_size=32, intermediate_size=64,
+        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4,
+        max_position_embeddings=128,
+    ))
+    model.save_pretrained(d)
+
+    tok = Tokenizer(models.WordLevel(
+        vocab={"<pad>": 0, "<eos>": 1} | {f"w{i}": i + 2 for i in range(125)},
+        unk_token="<eos>",
+    ))
+    tok.pre_tokenizer = pre_tokenizers.Whitespace()
+    fast = PreTrainedTokenizerFast(
+        tokenizer_object=tok, pad_token="<pad>", eos_token="<eos>"
+    )
+    fast.save_pretrained(d)
+    return str(d)

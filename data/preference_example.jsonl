@@ -1,0 +1,8 @@
+{"prompt": "3+5 等于多少？", "chosen": "3+5=8", "rejected": "3+5=9"}
+{"prompt": "10 的一半是多少？", "chosen": "10 的一半是 5。", "rejected": "10 的一半是 2。"}
+{"prompt": "把 'apple' 翻译成中文。", "chosen": "苹果", "rejected": "香蕉"}
+{"prompt": "12 乘以 3 等于多少？", "chosen": "12×3=36", "rejected": "12×3=15"}
+{"prompt": "水的化学式是什么？", "chosen": "水的化学式是 H₂O。", "rejected": "水的化学式是 CO₂。"}
+{"prompt": "7 减去 15 等于多少？", "chosen": "7-15=-8", "rejected": "7-15=8"}
+{"prompt": "一周有几天？", "chosen": "一周有 7 天。", "rejected": "一周有 5 天。"}
+{"prompt": "100 的平方根是多少？", "chosen": "100 的平方根是 10。", "rejected": "100 的平方根是 50。"}
