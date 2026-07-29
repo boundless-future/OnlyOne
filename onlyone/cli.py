@@ -42,6 +42,30 @@ def train(config: str = typer.Option(..., "--config", "-c", help="YAML 配置路
 
 
 @app.command()
+def train_grpo(config: str = typer.Option(..., "--config", "-c", help="YAML 配置路径(需含 grpo 段)")):
+    """Run GRPO online RL (self-generating data; no static dataloader)."""
+    from onlyone.utils.config import load_config
+
+    setup_console_logging()
+    cfg = load_config(config)
+    if cfg.grpo is None:
+        raise ValueError("配置缺少 grpo 段")
+    if cfg.algo.name != "grpo":
+        raise ValueError(f"train-grpo 需要 algo.name: grpo,当前为 {cfg.algo.name}")
+    tracker = Tracker(
+        log_with=cfg.train.log_with,
+        run_name=cfg.train.run_name,
+        output_dir=cfg.train.output_dir,
+        config=cfg.model_dump(),
+    )
+
+    from onlyone.trainers.grpo import build_grpo_trainer
+
+    trainer = build_grpo_trainer(cfg, tracker=tracker)
+    trainer.train()
+
+
+@app.command()
 def flywheel(config: str = typer.Option(..., "--config", "-c", help="YAML 配置路径(需含 raft 段)")):
     """Run the RAFT data flywheel: rollout -> filter -> SFT retrain, N rounds."""
     from onlyone.flywheel.raft import run_flywheel

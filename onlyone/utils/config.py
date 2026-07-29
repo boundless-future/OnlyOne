@@ -90,7 +90,7 @@ class AlgoConfig(_Base):
       (paper defaults β=2.0, γ=0.5)
     """
 
-    name: Literal["sft", "orpo", "kto", "dpo", "simpo"] = "sft"
+    name: Literal["sft", "orpo", "kto", "dpo", "simpo", "grpo"] = "sft"
     orpo_lambda: float = 0.1
     kto_beta: float = 0.1
     kto_desirable_weight: float = 1.0
@@ -117,6 +117,33 @@ class RaftConfig(_Base):
     make_preference: bool = True  # also emit best/worst DPO pairs
 
 
+class GRPOConfig(_Base):
+    """GRPO online-RL settings (design doc §3.2b).
+
+    Pipeline per iteration: rollout G candidates per prompt -> rule rewards ->
+    group-relative advantage -> clipped surrogate + k3 KL against the frozen
+    reference adapter. No Critic, no reward model — see design doc §2.2/§2.3.
+    """
+
+    prompts_path: str           # jsonl: {"prompt": ..., "meta": {...}}
+    group_size: int = 4         # G candidates per prompt
+    prompts_per_step: int = 8   # distinct prompts per iteration (batch = ×G)
+    rewards: list[str] = Field(default_factory=lambda: ["math_answer"])
+
+    clip_eps: float = 0.2       # PPO-style surrogate clip range
+    kl_beta: float = 0.04       # weight of the k3 KL-to-reference penalty
+    # Circuit breaker (design doc §5): abort if a step's mean KL exceeds this.
+    # 0 disables. Guards against silent policy collapse away from reference.
+    kl_circuit_breaker: float = 0.0
+
+    max_new_tokens: int = 256
+    temperature: float = 0.9    # >0: candidates within a group must differ
+    top_p: float = 0.95
+    rollout_batch_size: int = 8
+    engine: Literal["hf", "vllm"] = "hf"  # vllm requires Linux + onlyone[vllm]
+    vllm_gpu_mem_util: float = 0.35       # leave headroom for training peak
+
+
 class TrainJobConfig(_Base):
     """Root config for any training job; `algo.name` selects the trainer."""
 
@@ -125,6 +152,7 @@ class TrainJobConfig(_Base):
     train: TrainConfig
     algo: AlgoConfig = Field(default_factory=AlgoConfig)
     raft: Optional[RaftConfig] = None
+    grpo: Optional[GRPOConfig] = None
 
     @model_validator(mode="after")
     def _check_combinations(self):
