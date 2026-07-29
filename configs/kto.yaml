@@ -1,0 +1,37 @@
+# KTO 示例配置 — 二元好/坏标签，数据门槛最低；用双 adapter ref
+# 用法: onlyone train --config configs/kto.yaml
+model:
+  name_or_path: Qwen/Qwen2.5-1.5B
+  dtype: bf16
+  attn_implementation: sdpa
+  load_in_4bit: false
+  use_lora: true
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+
+data:
+  train_path: data/binary_example.jsonl
+  template: chatml
+  max_len: 1024
+  packing: false
+
+train:
+  output_dir: runs/kto_qwen15b
+  per_device_batch_size: 4
+  gradient_accumulation_steps: 8
+  lr: 5.0e-6
+  warmup_ratio: 0.05
+  max_steps: 500
+  gradient_checkpointing: true
+  logging_steps: 10
+  save_steps: 250
+  seed: 42
+  log_with: none
+  run_name: kto-qwen15b
+
+algo:
+  name: kto
+  kto_beta: 0.1
+  kto_desirable_weight: 1.0
+  kto_undesirable_weight: 1.0

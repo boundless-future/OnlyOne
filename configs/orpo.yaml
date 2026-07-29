@@ -1,0 +1,36 @@
+# ORPO 示例配置 — 免 reference model，显存 ≈ 纯 SFT
+# 用法: onlyone train --config configs/orpo.yaml
+model:
+  name_or_path: Qwen/Qwen2.5-1.5B
+  dtype: bf16
+  attn_implementation: sdpa
+  load_in_4bit: false
+  use_lora: true
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+
+data:
+  train_path: data/preference_example.jsonl
+  eval_path: data/gsm8k_example.jsonl   # onlyone eval 使用
+  template: chatml
+  max_len: 1024
+  packing: false            # 偏好数据禁止 packing（配置校验强制）
+
+train:
+  output_dir: runs/orpo_qwen15b
+  per_device_batch_size: 2  # 实际序列数 = 2x（chosen+rejected 拼接）
+  gradient_accumulation_steps: 8
+  lr: 5.0e-6
+  warmup_ratio: 0.05
+  max_steps: 500
+  gradient_checkpointing: true
+  logging_steps: 10
+  save_steps: 250
+  seed: 42
+  log_with: none
+  run_name: orpo-qwen15b
+
+algo:
+  name: orpo
+  orpo_lambda: 0.1          # odds-ratio 项权重，论文默认

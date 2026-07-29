@@ -78,22 +78,45 @@ class TrainConfig(_Base):
     device: str = "auto"
 
 
-class SFTConfig(_Base):
-    """Root config for the SFT trainer."""
+class AlgoConfig(_Base):
+    """Algorithm selection and hyperparameters.
+
+    Flat fields with per-algo prefixes keep YAML simple; unused fields for the
+    selected algorithm are ignored. Hyperparameter meanings:
+    - orpo_lambda: weight of the odds-ratio preference term (paper default 0.1)
+    - kto_beta: KL-to-reference temperature (paper default 0.1)
+    """
+
+    name: Literal["sft", "orpo", "kto"] = "sft"
+    orpo_lambda: float = 0.1
+    kto_beta: float = 0.1
+    kto_desirable_weight: float = 1.0
+    kto_undesirable_weight: float = 1.0
+
+
+class TrainJobConfig(_Base):
+    """Root config for any training job; `algo.name` selects the trainer."""
 
     model: ModelConfig
     data: DataConfig
     train: TrainConfig
+    algo: AlgoConfig = Field(default_factory=AlgoConfig)
 
     @model_validator(mode="after")
-    def _check_4bit_needs_lora(self):
+    def _check_combinations(self):
         if self.model.load_in_4bit and not self.model.use_lora:
             raise ValueError("4bit 量化只能配合 LoRA 训练（QLoRA）")
+        if self.data.packing and self.algo.name != "sft":
+            raise ValueError("packing 仅适用于 SFT；偏好/二元数据必须保持样本对齐")
         return self
 
 
-def load_config(path: str | Path) -> SFTConfig:
+# Backwards-compatible alias: SFT jobs are TrainJobConfig with algo.name="sft".
+SFTConfig = TrainJobConfig
+
+
+def load_config(path: str | Path) -> TrainJobConfig:
     """Load and validate a YAML config file."""
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
-    return SFTConfig.model_validate(raw)
+    return TrainJobConfig.model_validate(raw)

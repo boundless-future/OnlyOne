@@ -127,20 +127,18 @@ class UnifiedModel:
 
     # ------------------------------------------------------------------ math
 
-    def logps(
+    def token_logps(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: torch.Tensor,
-        average_per_token: bool = False,
-    ) -> torch.Tensor:
-        """Per-sequence summed log p(completion tokens | prompt).
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Masked per-token log probs and per-sequence completion counts.
 
-        `labels` uses -100 for positions that must be ignored (prompt tokens,
-        padding). Logits are shifted internally: position t predicts token t+1.
-
-        Returns shape (batch,). If `average_per_token`, divide by the number
-        of completion tokens (SimPO-style length normalization).
+        Returns (token_logps (B, T-1), counts (B,)). Masked positions (prompt,
+        padding) are exactly 0 in the output. This is the single forward pass
+        that all losses are derived from — SFT uses the sum, ORPO uses sum
+        AND per-token average, GRPO will use the full matrix.
         """
         out = self.model(input_ids=input_ids, attention_mask=attention_mask)
         logits = out.logits[:, :-1, :]
@@ -156,9 +154,27 @@ class UnifiedModel:
             logp_per_token, dim=-1, index=safe_labels.unsqueeze(-1)
         ).squeeze(-1)
         token_logps = token_logps * mask
+        return token_logps, mask.sum(dim=-1)
+
+    def logps(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        labels: torch.Tensor,
+        average_per_token: bool = False,
+    ) -> torch.Tensor:
+        """Per-sequence summed log p(completion tokens | prompt).
+
+        `labels` uses -100 for positions that must be ignored (prompt tokens,
+        padding). Logits are shifted internally: position t predicts token t+1.
+
+        Returns shape (batch,). If `average_per_token`, divide by the number
+        of completion tokens (SimPO-style length normalization).
+        """
+        token_logps, counts = self.token_logps(input_ids, attention_mask, labels)
         seq_logps = token_logps.sum(dim=-1)
         if average_per_token:
-            seq_logps = seq_logps / mask.sum(dim=-1).clamp(min=1)
+            seq_logps = seq_logps / counts.clamp(min=1)
         return seq_logps
 
     def mark_trained(self, steps: int) -> None:
