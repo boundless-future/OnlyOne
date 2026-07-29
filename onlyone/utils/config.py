@@ -85,13 +85,36 @@ class AlgoConfig(_Base):
     selected algorithm are ignored. Hyperparameter meanings:
     - orpo_lambda: weight of the odds-ratio preference term (paper default 0.1)
     - kto_beta: KL-to-reference temperature (paper default 0.1)
+    - dpo_beta: KL regularization strength (paper default 0.1)
+    - simpo_beta / simpo_gamma: logp-difference scale / target reward margin
+      (paper defaults β=2.0, γ=0.5)
     """
 
-    name: Literal["sft", "orpo", "kto"] = "sft"
+    name: Literal["sft", "orpo", "kto", "dpo", "simpo"] = "sft"
     orpo_lambda: float = 0.1
     kto_beta: float = 0.1
     kto_desirable_weight: float = 1.0
     kto_undesirable_weight: float = 1.0
+    dpo_beta: float = 0.1
+    simpo_beta: float = 2.0
+    simpo_gamma: float = 0.5
+
+
+class RaftConfig(_Base):
+    """RAFT data-flywheel settings (rollout -> filter -> retrain loop)."""
+
+    prompts_path: str           # jsonl: {"prompt": ..., "meta": {...}}
+    group_size: int = 4         # candidates sampled per prompt
+    rewards: list[str] = Field(default_factory=lambda: ["math_answer"])
+    threshold: float = 0.5      # min summed reward for a sample to be kept
+    rounds: int = 2
+    max_new_tokens: int = 256
+    temperature: float = 0.8    # >0: flywheel needs diverse candidates
+    top_p: float = 0.95
+    rollout_batch_size: int = 8
+    output_dir: str = "runs/raft"
+    train_sft: bool = True      # retrain on filtered data each round
+    make_preference: bool = True  # also emit best/worst DPO pairs
 
 
 class TrainJobConfig(_Base):
@@ -101,6 +124,7 @@ class TrainJobConfig(_Base):
     data: DataConfig
     train: TrainConfig
     algo: AlgoConfig = Field(default_factory=AlgoConfig)
+    raft: Optional[RaftConfig] = None
 
     @model_validator(mode="after")
     def _check_combinations(self):
