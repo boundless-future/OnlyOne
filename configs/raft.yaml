@@ -1,0 +1,48 @@
+# RAFT 数据飞轮示例配置 — rollout → 规则筛选 → SFT 再训练,N 轮迭代
+# 用法: onlyone flywheel --config configs/raft.yaml
+model:
+  name_or_path: Qwen/Qwen2.5-1.5B
+  dtype: bf16
+  attn_implementation: sdpa
+  load_in_4bit: false
+  use_lora: true
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+
+data:
+  train_path: data/sft_example.jsonl   # 飞轮不直接读,但 data 段为必填(template/max_len 生效)
+  template: chatml
+  max_len: 1024
+  packing: false
+
+train:
+  output_dir: runs/raft_qwen15b/sft
+  per_device_batch_size: 2
+  gradient_accumulation_steps: 4
+  lr: 1.0e-5
+  warmup_ratio: 0.03
+  max_steps: 200          # 每轮 SFT 再训练的步数
+  gradient_checkpointing: true
+  logging_steps: 10
+  save_steps: 100000      # 飞轮自己管理 adapter 保存,关闭周期性 ckpt
+  seed: 42
+  log_with: none
+  run_name: raft-qwen15b
+
+algo:
+  name: sft               # 飞轮内部再训练走 SFT
+
+raft:
+  prompts_path: data/prompts_example.jsonl
+  group_size: 4           # 每个 prompt 采样 4 个候选
+  rewards: [math_answer, length]
+  threshold: 0.9          # 数学答对(+1)且长度不罚分(0) => 0.9 才保留
+  rounds: 2
+  max_new_tokens: 256
+  temperature: 0.8        # 采样多样性:候选必须有差异
+  top_p: 0.95
+  rollout_batch_size: 8
+  output_dir: runs/raft_qwen15b
+  train_sft: true
+  make_preference: true   # 同时产出 best/worst DPO 偏好对

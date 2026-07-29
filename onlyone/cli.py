@@ -32,11 +32,37 @@ def train(config: str = typer.Option(..., "--config", "-c", help="YAML 配置路
         from onlyone.trainers.orpo import build_orpo_trainer as build
     elif cfg.algo.name == "kto":
         from onlyone.trainers.kto import build_kto_trainer as build
+    elif cfg.algo.name in ("dpo", "simpo"):
+        from onlyone.trainers.dpo import build_dpo_trainer as build
     else:
         raise ValueError(f"未知算法: {cfg.algo.name}")
 
     trainer, dataloader = build(cfg, tracker=tracker)
     trainer.train(dataloader)
+
+
+@app.command()
+def flywheel(config: str = typer.Option(..., "--config", "-c", help="YAML 配置路径(需含 raft 段)")):
+    """Run the RAFT data flywheel: rollout -> filter -> SFT retrain, N rounds."""
+    from onlyone.flywheel.raft import run_flywheel
+    from onlyone.utils.config import load_config
+
+    setup_console_logging()
+    cfg = load_config(config)
+    if cfg.raft is None:
+        raise ValueError("配置缺少 raft 段,无法运行 flywheel")
+    tracker = Tracker(
+        log_with=cfg.train.log_with,
+        run_name=cfg.train.run_name,
+        output_dir=cfg.raft.output_dir,
+        config=cfg.model_dump(),
+    )
+    results = run_flywheel(cfg, tracker=tracker)
+    for r in results:
+        typer.echo(
+            f"round {r.round_idx}: sft={len(r.sft_rows)} pref={len(r.pref_rows)} "
+            f"reward_mean={r.reward_mean:.3f} keep_rate={r.keep_rate:.1%}"
+        )
 
 
 @app.command(name="eval")

@@ -125,6 +125,25 @@ class UnifiedModel:
         if was_training:
             self.model.train()
 
+    @contextlib.contextmanager
+    def as_generator(self):
+        """Yield the model ready for rollout generation.
+
+        Training keeps use_cache=False (incompatible with gradient
+        checkpointing); generation needs the KV cache. This context flips
+        use_cache on, switches to eval + no_grad, and restores everything on
+        exit so the training loop is unaffected.
+        """
+        was_training = self.model.training
+        old_use_cache = self.model.config.use_cache
+        self.model.eval()
+        self.model.config.use_cache = True
+        with torch.no_grad():
+            yield self.model
+        self.model.config.use_cache = old_use_cache
+        if was_training:
+            self.model.train()
+
     # ------------------------------------------------------------------ math
 
     def token_logps(
