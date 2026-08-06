@@ -4,12 +4,10 @@ Single-card coexistence strategy (design doc §3.2c):
 - vLLM pre-allocates `gpu_mem_util` fraction of VRAM; the rest is left for
   training peak (activations + optimizer). Default 0.35 is a safe starting
   point for 1.5B bf16 on 24G.
-- Before rollout: hot-load the latest merged LoRA weights into vLLM, then
-  `wake_up()`. After rollout: `sleep()` releases the KV cache back to training.
-- Weight sync: vLLM's `LLM.load_weights()` is not public API across versions;
-  we use the documented-stable approach of loading through the model runner's
-  `model.load_weights` when available, else fall back to recreating the LLM
-  (slow but correct). The interface boundary is `sync_weights()`.
+- Weight sync order (vLLM sleep-mode docs, huggingface/trl#5142):
+  `wake_up() -> load_weights() -> generate() -> sleep()`. Loading weights
+  into a SLEEPING engine writes to offloaded/freed GPU memory and segfaults
+  on wake — wake must come first.
 
 Requires: pip install "onlyone[vllm]" on Linux. Not importable on Windows —
 all vllm imports are lazy so the module itself stays importable everywhere.
@@ -57,10 +55,13 @@ class VLLMRolloutEngine(RolloutEngine):
     def sync_weights(self) -> None:
         """Push the current policy weights into vLLM.
 
-        LoRA case: merge adapter into base weights in a temp dir and let vLLM
-        load from there. vLLM >=0.9 supports `LLM.sleep/wake_up` for colocate;
-        weight refresh uses `llm.llm_engine...load_weights` when the LLM
-        instance already exists, else the path is picked up at construction.
+        LoRA case: merge adapter into base weights in a temp dir. On first
+        call the engine is constructed from that path; afterwards we hot-load
+        through the model runner.
+
+        CRITICAL ordering (vllm sleep-mode docs, huggingface/trl#5142): the
+        engine must be AWAKE before load_weights. Loading into a sleeping
+        engine writes to offloaded/freed GPU memory and segfaults on wake.
         """
         if self._tmp_dir is None:
             self._tmp_dir = tempfile.TemporaryDirectory(prefix="onlyone_vllm_")
@@ -85,8 +86,9 @@ class VLLMRolloutEngine(RolloutEngine):
             )
             logger.info("vLLM engine created (gpu_mem_util=%.2f)", self.gpu_mem_util)
         else:
-            # Hot-reload into the running engine. This reaches into vLLM
-            # internals; guarded so a version bump fails loudly, not silently.
+            # Wake BEFORE touching weights — the engine slept after the last
+            # rollout, and load_weights on a sleeping engine is UB (segfault).
+            self._llm.wake_up()
             try:
                 from safetensors.torch import load_file
                 weights = list(load_file(str(path / "model.safetensors")).items())
@@ -115,7 +117,6 @@ class VLLMRolloutEngine(RolloutEngine):
             top_p=top_p,
         )
 
-        self._llm.wake_up()
         try:
             outputs = self._llm.generate(rendered, params)
         finally:
