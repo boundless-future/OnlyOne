@@ -18,6 +18,7 @@ all vllm imports are lazy so the module itself stays importable everywhere.
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
 from pathlib import Path
 
@@ -25,6 +26,11 @@ from onlyone.data.templates import get_template
 from onlyone.rollout.base import RolloutEngine
 
 logger = logging.getLogger("onlyone")
+
+# vLLM >=0.10 defaults to the V1 engine, whose internal LLMEngine layout
+# (multi-process EngineCore) is incompatible with our weight hot-load path.
+# Force the legacy V0 engine until we have a V1-compatible sync implementation.
+os.environ.setdefault("VLLM_USE_V1", "0")
 
 
 class VLLMRolloutEngine(RolloutEngine):
