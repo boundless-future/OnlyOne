@@ -140,3 +140,41 @@ def test_math_verify_reward_with_real_dependency():
         "p", r"\boxed{\frac{1}{2}}", {"gold": "0.5"}
     ) == 1.0
     assert math_verify_reward("p", r"\boxed{3}", {"gold": "2"}) == 0.0
+
+
+# --------------------------------------------------------------- run_round
+
+def test_run_round_records_per_prompt_rows():
+    """run_round must keep per-prompt meta/scores/kept for probe analysis."""
+    from onlyone.flywheel.raft import run_round
+
+    class FakeEngine:
+        def generate(self, prompts, n_per_prompt, max_new_tokens, temperature, top_p):
+            # prompt "easy" -> all good; "hard" -> all bad; "mid" -> one good
+            table = {"easy": "good", "hard": "bad", "mid": "bad"}
+            out = []
+            for p in prompts:
+                cands = [table[p]] * n_per_prompt
+                if p == "mid":
+                    cands[0] = "good"
+                out.append(cands)
+            return out
+
+    prompts = [
+        {"prompt": "easy", "meta": {"level": 0}},
+        {"prompt": "hard", "meta": {"level": 5}},
+        {"prompt": "mid", "meta": {"level": 3}},
+    ]
+    result = run_round(
+        0, prompts, FakeEngine(), _scoring_reward("good"),
+        group_size=4, threshold=0.5, max_new_tokens=8,
+        temperature=0.8, top_p=0.95, make_preference=False,
+    )
+
+    assert len(result.prompt_rows) == 3
+    by_level = {r["meta"]["level"]: r for r in result.prompt_rows}
+    assert by_level[0]["kept"] is True and by_level[0]["scores"] == [1.0] * 4
+    assert by_level[5]["kept"] is False and by_level[5]["scores"] == [0.0] * 4
+    assert by_level[3]["kept"] is True and by_level[3]["scores"][0] == 1.0
+    assert result.keep_rate == pytest.approx(2 / 3)
+    assert len(result.sft_rows) == 2

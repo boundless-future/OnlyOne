@@ -35,6 +35,9 @@ class RoundResult:
     n_prompts: int
     sft_rows: list[dict[str, Any]] = field(default_factory=list)
     pref_rows: list[dict[str, Any]] = field(default_factory=list)
+    # Per-prompt records for offline analysis (e.g. stage-1 difficulty probe):
+    # {"meta": {...}, "scores": [...], "kept": bool}
+    prompt_rows: list[dict[str, Any]] = field(default_factory=list)
     reward_mean: float = 0.0
     keep_rate: float = 0.0  # fraction of prompts that yielded an SFT row
 
@@ -100,6 +103,9 @@ def run_round(
             prompt, meta, candidates, reward_fn, threshold, make_preference
         )
         all_scores.extend(scores)
+        result.prompt_rows.append({
+            "meta": meta, "scores": scores, "kept": sft_row is not None,
+        })
         if sft_row:
             result.sft_rows.append(sft_row)
         if pref_row:
@@ -144,8 +150,13 @@ def run_flywheel(cfg, tracker=None) -> list[RoundResult]:
     tokenizer = load_tokenizer(cfg.model)
     um = UnifiedModel(cfg.model)
     um.model.to(device)
-    engine = HFRolloutEngine(um, tokenizer, template=cfg.data.template,
-                             device=device, batch_size=raft.rollout_batch_size)
+    if raft.engine == "vllm":
+        from onlyone.rollout.vllm_engine import VLLMRolloutEngine
+        engine = VLLMRolloutEngine(um, tokenizer, template=cfg.data.template,
+                                   device=device, gpu_mem_util=raft.vllm_gpu_mem_util)
+    else:
+        engine = HFRolloutEngine(um, tokenizer, template=cfg.data.template,
+                                 device=device, batch_size=raft.rollout_batch_size)
     reward_fn = build_reward(raft.rewards)
 
     with open(raft.prompts_path, "r", encoding="utf-8") as f:
@@ -165,6 +176,7 @@ def run_flywheel(cfg, tracker=None) -> list[RoundResult]:
         out_dir = Path(raft.output_dir) / f"round_{round_idx}"
         _write_jsonl(out_dir / "sft.jsonl", result.sft_rows)
         _write_jsonl(out_dir / "preference.jsonl", result.pref_rows)
+        _write_jsonl(out_dir / "scores.jsonl", result.prompt_rows)
         _write_jsonl(out_dir / "result.json", [{
             "round": round_idx, "reward_mean": result.reward_mean,
             "keep_rate": result.keep_rate,

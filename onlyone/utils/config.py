@@ -115,6 +115,8 @@ class RaftConfig(_Base):
     output_dir: str = "runs/raft"
     train_sft: bool = True      # retrain on filtered data each round
     make_preference: bool = True  # also emit best/worst DPO pairs
+    engine: Literal["hf", "vllm"] = "hf"  # vllm requires Linux + onlyone[vllm]
+    vllm_gpu_mem_util: float = 0.5        # probe 模式无训练共存,可比 GRPO 高
 
 
 class GRPOConfig(_Base):
