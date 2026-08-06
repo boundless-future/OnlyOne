@@ -10,7 +10,7 @@ from onlyone.data.datasets import (
     BinaryCollator, BinaryDataset, PreferenceCollator, PreferenceDataset,
 )
 from onlyone.eval.benchmarks import (
-    answers_match, extract_gold, extract_prediction,
+    answers_match, extract_boxed, extract_gold, extract_prediction,
 )
 from tests.test_data import FakeTokenizer, _write_jsonl
 
@@ -62,6 +62,19 @@ def test_extract_gold():
     assert extract_gold("推理过程……\n#### 42") == "42"
     assert extract_gold("#### 1,000") == "1000"
     assert extract_gold("没有标记") is None
+
+
+def test_extract_boxed():
+    assert extract_boxed(r"answer: \boxed{\frac{1}{2}}") == r"\frac{1}{2}"
+    assert extract_boxed(r"\boxed{1} then \boxed{x^{2} + 1}") == "x^{2} + 1"
+    assert extract_boxed(r"answer: \boxed {\frac{1}{2}}") == r"\frac{1}{2}"
+    assert extract_boxed(r"incomplete \boxed{42") is None
+    assert extract_boxed(r"answer: \boxed 2.") == "2"
+
+
+def test_extract_prediction_priority():
+    assert extract_prediction(r"\boxed{7}, but #### 8") == "8"
+    assert extract_prediction(r"first 3, final \boxed{\frac{1}{2}}") == r"\frac{1}{2}"
 
 
 def test_extract_prediction():

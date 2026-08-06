@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from onlyone.flywheel.raft import select_samples
@@ -9,6 +11,7 @@ from onlyone.rewards.base import combine
 from onlyone.rewards.registry import build_reward, register
 from onlyone.rewards.rules import (
     json_format_reward, length_penalty_reward, math_answer_reward,
+    math_verify_reward,
     regex_format_reward,
 )
 
@@ -105,5 +108,35 @@ def test_select_samples_pref_disabled():
     sft, pref, _ = select_samples(
         "p", {}, ["good a", "bad b"], _scoring_reward("good"),
         threshold=0.9, make_preference=False,
+
     )
     assert sft is not None and pref is None
+
+def test_math_verify_reward(monkeypatch):
+    class FakeMathVerify:
+        @staticmethod
+        def parse(value, **kwargs):
+            return value.removeprefix("The answer is $").removesuffix("$")
+
+        @staticmethod
+        def verify(gold, prediction, **kwargs):
+            equivalents = {("0.5", r"\frac{1}{2}"), ("2", "2.0")}
+            return gold == prediction or (gold, prediction) in equivalents
+
+    monkeypatch.setitem(sys.modules, "math_verify", FakeMathVerify)
+    assert math_verify_reward("p", r"\boxed{\frac{1}{2}}", {"gold": "0.5"}) == 1.0
+    assert math_verify_reward("p", r"\boxed{2.0}", {"gold": "2"}) == 1.0
+    assert math_verify_reward("p", r"\boxed{3}", {"gold": "2"}) == 0.0
+    assert math_verify_reward("p", "no answer", {"gold": "2"}) == 0.0
+    assert math_verify_reward("p", r"\boxed{2}", {}) == 0.0
+
+
+def test_math_verify_is_registered():
+    assert callable(build_reward(["math_verify"]))
+
+def test_math_verify_reward_with_real_dependency():
+    pytest.importorskip("math_verify")
+    assert math_verify_reward(
+        "p", r"\boxed{\frac{1}{2}}", {"gold": "0.5"}
+    ) == 1.0
+    assert math_verify_reward("p", r"\boxed{3}", {"gold": "2"}) == 0.0
