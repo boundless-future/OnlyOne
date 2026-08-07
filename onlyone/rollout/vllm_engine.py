@@ -18,10 +18,13 @@ all vllm imports are lazy so the module itself stays importable everywhere.
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import tempfile
 from pathlib import Path
+
+import torch
 
 from onlyone.data.templates import get_template
 from onlyone.models.unified import DEFAULT_ADAPTER
@@ -90,6 +93,12 @@ class VLLMRolloutEngine(RolloutEngine):
             logger.info("vLLM engine created (gpu_mem_util=%.2f, lora r=%d)",
                         self.gpu_mem_util, self.um.cfg.lora_r)
         else:
+            # Release PyTorch's free-but-reserved blocks before waking: after a
+            # training step the caching allocator holds most of the training
+            # peak, and vLLM's cuMem wake needs physically free GPU memory
+            # (CUDA OOM in cumem_allocator otherwise — smoke 2026-08-07).
+            gc.collect()
+            torch.cuda.empty_cache()
             # Wake BEFORE swapping — the engine slept after the last rollout,
             # and mutating a sleeping engine is UB (segfault on wake).
             self._llm.wake_up()
