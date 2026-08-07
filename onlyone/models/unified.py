@@ -20,6 +20,7 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
+import torch.utils.checkpoint
 from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import PreTrainedModel
 
@@ -151,7 +152,7 @@ class UnifiedModel:
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: torch.Tensor,
-        logps_chunk_size: int = 4,
+        logps_chunk_size: int = 2,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Masked per-token log probs and per-sequence completion counts.
 
@@ -160,31 +161,52 @@ class UnifiedModel:
         that all losses are derived from — SFT uses the sum, ORPO uses sum
         AND per-token average, GRPO will use the full matrix.
 
-        The forward is chunked over the batch dimension: full-vocab logits for
-        B sequences at fp32 cost B×T×V×4 bytes (7B/152k vocab: ~12G at B=32,
-        which OOMs a 32G card). Chunking keeps numerics identical while
-        bounding the peak to chunk_size×T×V×4 (~1.5G at chunk 4).
+        Full-vocab memory scales as B×T×V×4 bytes at fp32 (7B/152k vocab:
+        ~25G at B=32, T=1280 — more than a 32G card has), so two mechanisms
+        stack here:
+        - the forward is chunked over the batch, bounding transient logits
+          temporaries to chunk×T×V×4 (~1.5G at chunk 2, T=1280);
+        - each chunk runs under torch.utils.checkpoint while training,
+          because autograd would otherwise RETAIN every chunk's fp32
+          log_softmax output until backward — B×T×V×4 total no matter how
+          small the chunks are (smoke #4 OOM, 2026-08-07). Checkpointing
+          saves only the tiny int inputs and recomputes per chunk in
+          backward. Numerics and grads are identical (dropout RNG is
+          replayed by the non-reentrant checkpoint).
         """
-        chunks: list[torch.Tensor] = []
-        counts: list[torch.Tensor] = []
-        for start in range(0, input_ids.shape[0], logps_chunk_size):
-            sl = slice(start, start + logps_chunk_size)
-            out = self.model(input_ids=input_ids[sl], attention_mask=attention_mask[sl])
+        # counts depend only on labels — no need to involve the forward.
+        counts = (labels[:, 1:] != -100).sum(dim=-1)
+
+        def _chunk_token_logps(ids_c, attn_c, labels_c):
+            out = self.model(input_ids=ids_c, attention_mask=attn_c)
             logits = out.logits[:, :-1, :]
-            shifted_labels = labels[sl, 1:]
+            shifted_labels = labels_c[:, 1:]
             mask = shifted_labels != -100
 
             logp_per_token = torch.log_softmax(logits.float(), dim=-1)
-            # Replace -100 labels by 0 before gather, but also zero out the gathered
-            # value for masked positions afterwards so arbitrary garbage at masked
-            # indices cannot leak into the sum.
+            # Replace -100 labels by 0 before gather, but also zero out the
+            # gathered value for masked positions afterwards so arbitrary
+            # garbage at masked indices cannot leak into the sum.
             safe_labels = shifted_labels.clamp(min=0)
             token_logps = torch.gather(
                 logp_per_token, dim=-1, index=safe_labels.unsqueeze(-1)
             ).squeeze(-1)
-            chunks.append(token_logps * mask)
-            counts.append(mask.sum(dim=-1))
-        return torch.cat(chunks), torch.cat(counts)
+            return token_logps * mask
+
+        use_checkpoint = torch.is_grad_enabled() and self.model.training
+        chunks: list[torch.Tensor] = []
+        for start in range(0, input_ids.shape[0], logps_chunk_size):
+            sl = slice(start, start + logps_chunk_size)
+            if use_checkpoint:
+                chunks.append(torch.utils.checkpoint.checkpoint(
+                    _chunk_token_logps,
+                    input_ids[sl], attention_mask[sl], labels[sl],
+                    use_reentrant=False,
+                ))
+            else:
+                chunks.append(_chunk_token_logps(
+                    input_ids[sl], attention_mask[sl], labels[sl]))
+        return torch.cat(chunks), counts
 
     def logps(
         self,
