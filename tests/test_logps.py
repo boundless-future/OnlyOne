@@ -36,6 +36,23 @@ def test_logps_matches_hand_computed(um):
     assert torch.allclose(got, want, atol=1e-5), f"max diff {(got - want).abs().max()}"
 
 
+def test_token_logps_chunking_is_numerically_identical(um):
+    """Chunked forward (memory fix for 7B full-vocab logits) must match the
+    unchunked result exactly — same kernels, just fewer rows per call."""
+    input_ids, attention_mask, labels = make_batch()
+    with torch.no_grad():
+        full_logps, full_counts = um.token_logps(
+            input_ids, attention_mask, labels, logps_chunk_size=10_000
+        )
+        chunked_logps, chunked_counts = um.token_logps(
+            input_ids, attention_mask, labels, logps_chunk_size=1
+        )
+    assert torch.allclose(chunked_logps, full_logps, atol=1e-6), (
+        f"max diff {(chunked_logps - full_logps).abs().max()}"
+    )
+    assert torch.equal(chunked_counts, full_counts)
+
+
 def test_logps_all_masked_is_zero(um):
     input_ids, attention_mask, labels = make_batch()
     labels[:] = -100

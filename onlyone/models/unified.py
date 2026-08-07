@@ -151,6 +151,7 @@ class UnifiedModel:
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: torch.Tensor,
+        logps_chunk_size: int = 4,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Masked per-token log probs and per-sequence completion counts.
 
@@ -158,22 +159,32 @@ class UnifiedModel:
         padding) are exactly 0 in the output. This is the single forward pass
         that all losses are derived from — SFT uses the sum, ORPO uses sum
         AND per-token average, GRPO will use the full matrix.
-        """
-        out = self.model(input_ids=input_ids, attention_mask=attention_mask)
-        logits = out.logits[:, :-1, :]
-        shifted_labels = labels[:, 1:]
-        mask = shifted_labels != -100
 
-        logp_per_token = torch.log_softmax(logits.float(), dim=-1)
-        # Replace -100 labels by 0 before gather, but also zero out the gathered
-        # value for masked positions afterwards so arbitrary garbage at masked
-        # indices cannot leak into the sum.
-        safe_labels = shifted_labels.clamp(min=0)
-        token_logps = torch.gather(
-            logp_per_token, dim=-1, index=safe_labels.unsqueeze(-1)
-        ).squeeze(-1)
-        token_logps = token_logps * mask
-        return token_logps, mask.sum(dim=-1)
+        The forward is chunked over the batch dimension: full-vocab logits for
+        B sequences at fp32 cost B×T×V×4 bytes (7B/152k vocab: ~12G at B=32,
+        which OOMs a 32G card). Chunking keeps numerics identical while
+        bounding the peak to chunk_size×T×V×4 (~1.5G at chunk 4).
+        """
+        chunks: list[torch.Tensor] = []
+        counts: list[torch.Tensor] = []
+        for start in range(0, input_ids.shape[0], logps_chunk_size):
+            sl = slice(start, start + logps_chunk_size)
+            out = self.model(input_ids=input_ids[sl], attention_mask=attention_mask[sl])
+            logits = out.logits[:, :-1, :]
+            shifted_labels = labels[sl, 1:]
+            mask = shifted_labels != -100
+
+            logp_per_token = torch.log_softmax(logits.float(), dim=-1)
+            # Replace -100 labels by 0 before gather, but also zero out the gathered
+            # value for masked positions afterwards so arbitrary garbage at masked
+            # indices cannot leak into the sum.
+            safe_labels = shifted_labels.clamp(min=0)
+            token_logps = torch.gather(
+                logp_per_token, dim=-1, index=safe_labels.unsqueeze(-1)
+            ).squeeze(-1)
+            chunks.append(token_logps * mask)
+            counts.append(mask.sum(dim=-1))
+        return torch.cat(chunks), torch.cat(counts)
 
     def logps(
         self,
