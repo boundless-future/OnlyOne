@@ -231,6 +231,10 @@ onlyone train-grpo --config test_grpo.yaml \
 健康标志：每步有 `reward_mean` 输出、`checkpoint saved` 正常、`vram_peak_gb` 稳定。
 若 `n_degenerate_groups` 持续过半，说明配比或 group_size 有问题（G 至少为 4）。
 
+> 权重同步机制（vLLM 引擎）：训练侧只存 LoRA adapter（r=16 约 160MB）,
+> vLLM 常驻 bf16 基座，每步通过 `add_lora`/`remove_lora` 热插拔（秒级）。
+> 因此 vLLM 引擎要求 `use_lora: true`；全量训练请用 `engine: hf`。
+
 ---
 
 ## 下一步（本文档待续）

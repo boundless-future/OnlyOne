@@ -1,13 +1,16 @@
 """vLLM colocate rollout engine (Linux only, M4 performance path).
 
 Single-card coexistence strategy (design doc §3.2c):
-- vLLM pre-allocates `gpu_mem_util` fraction of VRAM; the rest is left for
-  training peak (activations + optimizer). Default 0.35 is a safe starting
-  point for 1.5B bf16 on 24G.
-- Weight sync order (vLLM sleep-mode docs, huggingface/trl#5142):
-  `wake_up() -> load_weights() -> generate() -> sleep()`. Loading weights
-  into a SLEEPING engine writes to offloaded/freed GPU memory and segfaults
-  on wake — wake must come first.
+- vLLM loads the BF16 BASE model ONCE with `enable_lora=True`; per-step weight
+  sync saves only the LoRA adapter (~160MB for r=16) and hot-swaps it via
+  `add_lora`/`remove_lora`. This replaces the old merge-and-reload approach,
+  which cost 30-60s per step AND was unsound under QLoRA (merge_and_unload
+  on 4bit shares modules with the training model — probe 2026-08-07).
+- Sleep/wake ordering (vllm sleep-mode docs, huggingface/trl#5142):
+  `wake_up() -> swap adapter -> generate() -> sleep()`. Mutating a SLEEPING
+  engine touches offloaded/freed GPU memory and segfaults on wake.
+- Requires `use_lora: true` — without an adapter there is nothing to swap;
+  use `engine: hf` for full-parameter runs.
 
 Requires: pip install "onlyone[vllm]" on Linux. Not importable on Windows —
 all vllm imports are lazy so the module itself stays importable everywhere.
@@ -21,13 +24,13 @@ import tempfile
 from pathlib import Path
 
 from onlyone.data.templates import get_template
+from onlyone.models.unified import DEFAULT_ADAPTER
 from onlyone.rollout.base import RolloutEngine
 
 logger = logging.getLogger("onlyone")
 
-# vLLM >=0.10 defaults to the V1 engine, whose internal LLMEngine layout
-# (multi-process EngineCore) is incompatible with our weight hot-load path.
-# Force the legacy V0 engine until we have a V1-compatible sync implementation.
+# vLLM >=0.10 defaults to the V1 engine; the LoRA hot-swap + sleep/wake path
+# here is validated on the legacy V0 engine only (0.10.2, RTX 5090).
 os.environ.setdefault("VLLM_USE_V1", "0")
 
 
@@ -41,86 +44,68 @@ class VLLMRolloutEngine(RolloutEngine):
                 "vLLM 引擎需要 Linux + `pip install onlyone[vllm]`;"
                 "Windows 请使用 engine: hf"
             ) from e
+        if not getattr(um.cfg, "use_lora", False):
+            raise RuntimeError(
+                "vLLM 引擎依赖 LoRA adapter 热插拔,需要 use_lora: true;"
+                "全量训练请使用 engine: hf"
+            )
 
         self.um = um
         self.tokenizer = tokenizer
         self.template = get_template(template)
         self.device = device
         self.gpu_mem_util = gpu_mem_util
-        self._llm = None  # created lazily on first generate (after first sync)
+        self._llm = None  # created lazily on first sync
+        self._lora_id = 0          # bumped every swap; vLLM requires unique ids
+        self._active_lora = None   # LoRARequest for the current policy adapter
         self._tmp_dir: tempfile.TemporaryDirectory | None = None
 
     # ---------------------------------------------------------- weight sync
 
     def sync_weights(self) -> None:
-        """Push the current policy weights into vLLM.
+        """Push the current policy adapter into vLLM.
 
-        LoRA case: merge adapter into base weights in a temp dir. On first
-        call the engine is constructed from that path; afterwards we hot-load
-        through the model runner.
-
-        CRITICAL ordering (vllm sleep-mode docs, huggingface/trl#5142): the
-        engine must be AWAKE before load_weights. Loading into a sleeping
-        engine writes to offloaded/freed GPU memory and segfaults on wake.
+        Saves ONLY the default adapter (never the frozen ref adapter) and
+        hot-swaps it into the running engine under a fresh lora id.
         """
         if self._tmp_dir is None:
             self._tmp_dir = tempfile.TemporaryDirectory(prefix="onlyone_vllm_")
-        path = Path(self._tmp_dir.name) / "merged"
+        path = Path(self._tmp_dir.name) / "policy_adapter"
+        self.um.model.save_pretrained(path, selected_adapters=[DEFAULT_ADAPTER])
 
-        merged = self.um.model.merge_and_unload() if hasattr(self.um.model, "merge_and_unload") else self.um.model
-        merged.save_pretrained(path)
-        self.tokenizer.save_pretrained(path)
-        # NOTE: merge_and_unload mutates the training model in some PEFT
-        # versions — we immediately re-wrap below to keep training intact.
-        # (PEFT >=0.10 merge_and_unload returns a NEW model; the original
-        # PeftModel keeps its adapters. We discard the merged copy after save.)
-
-        # Free the merged copy BEFORE waking vLLM. On 7B the bf16 merged model
-        # is ~14GB; if it is still resident when vLLM reallocates its weights
-        # the two allocations overlap and OOM the card.
-        del merged
-        import gc
-        import torch
-        gc.collect()
-        torch.cuda.empty_cache()
+        from vllm.lora.request import LoRARequest
 
         if self._llm is None:
             from vllm import LLM
             self._llm = LLM(
-                model=str(path),
+                model=str(self.um.cfg.name_or_path),
+                enable_lora=True,
+                max_lora_rank=self.um.cfg.lora_r,
+                max_loras=2,               # old + new during a swap
                 gpu_memory_utilization=self.gpu_mem_util,
-                enable_sleep_mode=True,   # sleep/wake colocate (vllm >=0.9)
+                enable_sleep_mode=True,    # sleep/wake colocate (vllm >=0.9)
                 max_model_len=4096,
-                enforce_eager=False,
+                enforce_eager=True,        # LoRA+cudagraph 未验证,先 eager 求稳
             )
-            logger.info("vLLM engine created (gpu_mem_util=%.2f)", self.gpu_mem_util)
+            logger.info("vLLM engine created (gpu_mem_util=%.2f, lora r=%d)",
+                        self.gpu_mem_util, self.um.cfg.lora_r)
         else:
-            # Wake BEFORE touching weights — the engine slept after the last
-            # rollout, and load_weights on a sleeping engine is UB (segfault).
+            # Wake BEFORE swapping — the engine slept after the last rollout,
+            # and mutating a sleeping engine is UB (segfault on wake).
             self._llm.wake_up()
-            try:
-                from safetensors.torch import load_file
-                # HF shards large models (7B merged > ~5G) into
-                # model-0000X-of-0000Y.safetensors; the glob also matches the
-                # single-file case (model.safetensors).
-                weights = []
-                for shard in sorted(path.glob("model*.safetensors")):
-                    weights.extend(load_file(str(shard)).items())
-                if not weights:
-                    raise RuntimeError(f"merged 目录无 safetensors 权重文件: {path}")
-                runner = self._llm.llm_engine.model_executor.driver_worker.model_runner
-                runner.model.load_weights(weights)
-            except (AttributeError, ImportError) as e:
-                raise RuntimeError(
-                    f"vLLM 权重热加载失败(版本 API 变动?)。"
-                    f"请将 engine 临时切回 hf,或在此适配新版 vLLM API: {e}"
-                ) from e
+
+        old_id = self._lora_id
+        self._lora_id += 1
+        request = LoRARequest("policy", self._lora_id, str(path))
+        self._llm.llm_engine.add_lora(request)
+        if old_id > 0:
+            self._llm.llm_engine.remove_lora(old_id)
+        self._active_lora = request
 
     # -------------------------------------------------------------- generate
 
     def generate(self, prompts, n_per_prompt, max_new_tokens, temperature, top_p):
-        # GRPO 每步都更新 policy,必须每轮 rollout 前同步权重。
-        # (代价:merge + save + load_weights;M4 后续可换 TRL 式 collective RPC)
+        # GRPO 每步都更新 policy,必须每轮 rollout 前同步 adapter。
         self.sync_weights()
 
         from vllm import SamplingParams
@@ -134,9 +119,10 @@ class VLLMRolloutEngine(RolloutEngine):
         )
 
         try:
-            outputs = self._llm.generate(rendered, params)
+            outputs = self._llm.generate(rendered, params,
+                                         lora_request=self._active_lora)
         finally:
-            self._llm.sleep()  # release KV cache back to training
+            self._llm.sleep()  # release weights/KV back to training
         return [[o.text for o in out.outputs] for out in outputs]
 
     def __del__(self):
