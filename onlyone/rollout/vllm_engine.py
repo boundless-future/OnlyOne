@@ -100,7 +100,14 @@ class VLLMRolloutEngine(RolloutEngine):
             self._llm.wake_up()
             try:
                 from safetensors.torch import load_file
-                weights = list(load_file(str(path / "model.safetensors")).items())
+                # HF shards large models (7B merged > ~5G) into
+                # model-0000X-of-0000Y.safetensors; the glob also matches the
+                # single-file case (model.safetensors).
+                weights = []
+                for shard in sorted(path.glob("model*.safetensors")):
+                    weights.extend(load_file(str(shard)).items())
+                if not weights:
+                    raise RuntimeError(f"merged 目录无 safetensors 权重文件: {path}")
                 runner = self._llm.llm_engine.model_executor.driver_worker.model_runner
                 runner.model.load_weights(weights)
             except (AttributeError, ImportError) as e:
