@@ -75,6 +75,15 @@ class VLLMRolloutEngine(RolloutEngine):
         # (PEFT >=0.10 merge_and_unload returns a NEW model; the original
         # PeftModel keeps its adapters. We discard the merged copy after save.)
 
+        # Free the merged copy BEFORE waking vLLM. On 7B the bf16 merged model
+        # is ~14GB; if it is still resident when vLLM reallocates its weights
+        # the two allocations overlap and OOM the card.
+        del merged
+        import gc
+        import torch
+        gc.collect()
+        torch.cuda.empty_cache()
+
         if self._llm is None:
             from vllm import LLM
             self._llm = LLM(

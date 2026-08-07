@@ -1,0 +1,56 @@
+# 阶段 3 GRPO 主训练配置 — Qwen2.5-7B-Instruct + MATH 混合集,32G 单卡 QLoRA
+# 用法: onlyone train-grpo --config configs/grpo_7b_math.yaml
+# 服务器本地模型路径用 -O 覆盖:
+#   onlyone train-grpo -c configs/grpo_7b_math.yaml \
+#     -O model.name_or_path=/cloud/models/Qwen2.5-7B-Instruct
+# 数据配比起源: 阶段 1 探测(qwen25_7b_math_grpo_stage1_execution_record.md §7)
+model:
+  name_or_path: Qwen/Qwen2.5-7B-Instruct
+  dtype: bf16
+  attn_implementation: sdpa   # flash_attention_2 未安装(5090 编译成本高)
+  load_in_4bit: true          # 7B 在 32G 单卡只有 QLoRA 一条路(能力矩阵)
+  use_lora: true
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+
+data:
+  train_path: data/sft_example.jsonl   # GRPO 自产数据,此字段仅为满足 schema
+  template: chatml
+  max_len: 1280               # prompt(~300) + completion(~768) 上限
+  packing: false
+
+train:
+  output_dir: runs/grpo_7b_math
+  per_device_batch_size: 1    # GRPO 不用此字段(batch = prompts_per_step × G)
+  gradient_accumulation_steps: 1
+  lr: 1.0e-6                  # RL 学习率要比 SFT 小一个量级
+  warmup_ratio: 0.05
+  max_steps: 300
+  gradient_checkpointing: true
+  logging_steps: 5
+  save_steps: 50
+  seed: 42
+  log_with: none              # 服务器 wandb 未登录;登录后可改 wandb
+  run_name: grpo-7b-math
+
+algo:
+  name: grpo
+
+grpo:
+  prompts_path: data/math/prompts_mix.jsonl   # 阶段 1 定稿配比
+  group_size: 4               # G=4;组内必须有 reward 方差
+  prompts_per_step: 8         # 每步 8 prompt × 4 候选 = 32 条序列
+  rewards: [math_verify, length]
+
+  clip_eps: 0.2
+  kl_beta: 0.04
+  kl_circuit_breaker: 0.5     # KL 超过 0.5 立即熔断保存(0 关闭)
+
+  max_new_tokens: 512         # 中期可提到 768
+  temperature: 0.9            # 组内多样性:候选必须有 reward 方差
+  top_p: 0.95
+  rollout_batch_size: 8
+  engine: vllm
+  vllm_gpu_mem_util: 0.55     # 7B bf16 merged 权重 ~15G 必须落在 vLLM 预算内;
+                              # 0.55×31.36≈17G(权重 15G + KV ~2G),不能再低
