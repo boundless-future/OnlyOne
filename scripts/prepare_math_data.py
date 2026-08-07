@@ -96,25 +96,64 @@ def build_mix(
     *,
     size: int = 4000,
     seed: int = 42,
+    level_weights: dict[int, float] | None = None,
 ) -> list[dict[str, Any]]:
-    """Sample GSM8K:MATH-L1~2:MATH-L3~5 with a 1:1:2 ratio."""
-    if size <= 0 or size % 4:
-        raise ValueError("mix size must be a positive multiple of 4")
-    unit = size // 4
-    low = [
-        row for row in math_rows
-        if isinstance(row["meta"]["level"], int) and row["meta"]["level"] <= 2
-    ]
-    high = [
-        row for row in math_rows
-        if isinstance(row["meta"]["level"], int) and row["meta"]["level"] >= 3
-    ]
+    """Sample a mixed prompt set with optional per-level weights.
+
+    Args:
+        level_weights: mapping from level (0=gsm8k, 1~5=MATH) to relative
+            weight. If None, fall back to the legacy 1:1:2 split
+            (GSM8K : MATH-L1~2 : MATH-L3~5).
+    """
+    if size <= 0:
+        raise ValueError("mix size must be positive")
+
+    # Build buckets per integer level; gsm8k is level 0.
+    buckets: dict[int, list[dict[str, Any]]] = {0: gsm8k}
+    for row in math_rows:
+        level = row["meta"].get("level")
+        if isinstance(level, int):
+            buckets.setdefault(level, []).append(row)
+
     rng = random.Random(seed)
-    mixed = (
-        _sample(gsm8k, unit, rng)
-        + _sample(low, unit, rng)
-        + _sample(high, unit * 2, rng)
-    )
+
+    if level_weights is None:
+        # Legacy 1:1:2 split preserved for backwards compatibility.
+        if size % 4:
+            raise ValueError("legacy mix size must be a multiple of 4")
+        unit = size // 4
+        low = []
+        high = []
+        for level, rows in buckets.items():
+            if level == 0:
+                continue
+            (low if level <= 2 else high).extend(rows)
+        mixed = _sample(gsm8k, unit, rng) + _sample(low, unit, rng) + _sample(high, unit * 2, rng)
+        rng.shuffle(mixed)
+        return mixed
+
+    # Normalize weights and compute counts, rounding to integers that sum to size.
+    levels = sorted(level_weights.keys())
+    total_weight = sum(level_weights[l] for l in levels)
+    if total_weight <= 0:
+        raise ValueError("level weights must sum to a positive value")
+
+    raw_counts = {l: size * level_weights[l] / total_weight for l in levels}
+    counts = {l: int(raw_counts[l]) for l in levels}
+    remainder = size - sum(counts.values())
+    # Distribute the rounding remainder to the largest fractional parts.
+    if remainder:
+        for l in sorted(raw_counts, key=lambda x: raw_counts[x] - counts[x], reverse=True)[:remainder]:
+            counts[l] += 1
+
+    mixed: list[dict[str, Any]] = []
+    for level in levels:
+        count = counts[level]
+        if count == 0:
+            continue
+        if level not in buckets:
+            raise ValueError(f"level {level} has no available prompts")
+        mixed.extend(_sample(buckets[level], count, rng))
     rng.shuffle(mixed)
     return mixed
 
@@ -177,6 +216,7 @@ def prepare(
     output_dir: Path,
     *,
     mix_size: int = 4000,
+    mix_level_weights: dict[int, float] | None = None,
     probe_per_level: int = 100,
     seed: int = 42,
     check_counts: bool = True,
@@ -202,7 +242,8 @@ def prepare(
         "math500_test": write_jsonl(output_dir / "math500_test.jsonl", math500),
         "prompts_mix": write_jsonl(
             output_dir / "prompts_mix.jsonl",
-            build_mix(gsm8k, math_rows, size=mix_size, seed=seed),
+            build_mix(gsm8k, math_rows, size=mix_size, seed=seed,
+                      level_weights=mix_level_weights),
         ),
         "prompts_mix_probe": write_jsonl(
             output_dir / "prompts_mix_probe.jsonl",
@@ -212,10 +253,38 @@ def prepare(
     return outputs
 
 
+def _parse_level_weights(raw: str | None) -> dict[int, float] | None:
+    """Parse a JSON object like '{"0":5,"1":5,...}' into level weights."""
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(f"level weights must be valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise argparse.ArgumentTypeError("level weights must be a JSON object")
+    weights: dict[int, float] = {}
+    for key, value in parsed.items():
+        try:
+            level = int(key)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"level key must be int, got {key!r}") from exc
+        if not isinstance(value, (int, float)):
+            raise argparse.ArgumentTypeError(f"weight for level {level} must be numeric")
+        if value < 0:
+            raise argparse.ArgumentTypeError(f"weight for level {level} must be non-negative")
+        weights[level] = float(value)
+    if not weights:
+        raise argparse.ArgumentTypeError("level weights must not be empty")
+    return weights
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=Path("data/math"))
     parser.add_argument("--mix-size", type=int, default=4000)
+    parser.add_argument("--mix-level-weights", type=_parse_level_weights, default=None,
+                        help='per-level mix weights as JSON, e.g. \'{"0":5,"1":5,"2":10,"3":25,"4":27.5,"5":27.5}\'')
     parser.add_argument("--probe-per-level", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--skip-count-check", action="store_true")
@@ -223,6 +292,7 @@ def main() -> None:
     counts = prepare(
         args.output_dir,
         mix_size=args.mix_size,
+        mix_level_weights=args.mix_level_weights,
         probe_per_level=args.probe_per_level,
         seed=args.seed,
         check_counts=not args.skip_count_check,

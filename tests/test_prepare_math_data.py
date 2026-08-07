@@ -8,6 +8,7 @@ from collections import Counter
 import pytest
 
 from scripts.prepare_math_data import (
+    _parse_level_weights,
     build_mix,
     build_probe,
     convert_gsm8k,
@@ -90,3 +91,40 @@ def test_build_probe_and_write_jsonl(tmp_path):
     assert write_jsonl(path, probe) == 6
     loaded = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert loaded == probe
+
+
+def test_build_mix_with_level_weights():
+    """Stage-1 配比: 按 level 权重采样, 条数与权重成比例且总数精确。"""
+    gsm8k = [_prompt("gsm8k", 0, index) for index in range(500)]
+    math_rows = [
+        *[_prompt("math", level, index) for level in range(1, 6) for index in range(500)],
+    ]
+    weights = _parse_level_weights('{"0":5,"1":5,"2":10,"3":25,"4":27.5,"5":27.5}')
+    mixed = build_mix(gsm8k, math_rows, size=200, seed=42, level_weights=weights)
+    assert len(mixed) == 200
+    counts = Counter(row["meta"]["level"] for row in mixed)
+    assert counts == {0: 10, 1: 10, 2: 20, 3: 50, 4: 55, 5: 55}
+
+    # determinism
+    again = build_mix(gsm8k, math_rows, size=200, seed=42, level_weights=weights)
+    assert mixed == again
+
+    # zero-weight level excluded
+    weights_no5 = _parse_level_weights('{"0":50,"1":50,"5":0}')
+    mixed_no5 = build_mix(gsm8k, math_rows, size=20, seed=1, level_weights=weights_no5)
+    assert len(mixed_no5) == 20
+    assert Counter(row["meta"]["level"] for row in mixed_no5) == {0: 10, 1: 10}
+
+
+def test_parse_level_weights_validation():
+    import argparse
+
+    assert _parse_level_weights(None) is None
+    with pytest.raises(argparse.ArgumentTypeError):
+        _parse_level_weights("not json")
+    with pytest.raises(argparse.ArgumentTypeError):
+        _parse_level_weights('[1,2]')
+    with pytest.raises(argparse.ArgumentTypeError):
+        _parse_level_weights('{"x": 1}')
+    with pytest.raises(argparse.ArgumentTypeError):
+        _parse_level_weights('{"1": -1}')
