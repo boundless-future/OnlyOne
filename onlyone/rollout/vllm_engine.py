@@ -21,6 +21,7 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -69,11 +70,13 @@ class VLLMRolloutEngine(RolloutEngine):
         """Push the current policy adapter into vLLM.
 
         Saves ONLY the default adapter (never the frozen ref adapter) and
-        hot-swaps it into the running engine under a fresh lora id.
+        hot-swaps it into the running engine under a fresh lora id. Each step
+        writes a NEW adapter directory: overwriting the file vLLM may still
+        have mmap'd is a use-after-write race.
         """
         if self._tmp_dir is None:
             self._tmp_dir = tempfile.TemporaryDirectory(prefix="onlyone_vllm_")
-        path = Path(self._tmp_dir.name) / "policy_adapter"
+        path = Path(self._tmp_dir.name) / f"policy_adapter_{self._lora_id + 1}"
         self.um.model.save_pretrained(path, selected_adapters=[DEFAULT_ADAPTER])
 
         from vllm.lora.request import LoRARequest
@@ -110,6 +113,12 @@ class VLLMRolloutEngine(RolloutEngine):
         if old_id > 0:
             self._llm.llm_engine.remove_lora(old_id)
         self._active_lora = request
+        # Drop adapter dirs from 2+ swaps ago (keep current and previous —
+        # previous may still be referenced by vLLM internals). Bounds /tmp
+        # growth to ~2 adapters (~320MB) over a long run.
+        stale = Path(self._tmp_dir.name) / f"policy_adapter_{self._lora_id - 2}"
+        if stale.exists():
+            shutil.rmtree(stale, ignore_errors=True)
 
     # -------------------------------------------------------------- generate
 
