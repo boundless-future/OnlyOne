@@ -109,6 +109,8 @@ def plot(rows: list[dict], path: str) -> None:
     axes[-1][0].set_xlabel("step")
     fig.suptitle(f"training trend: step {steps[0]} → {steps[-1]} ({len(rows)} pts)")
     fig.tight_layout()
+    from pathlib import Path
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=120)
     print(f"图已保存: {path}")
 
