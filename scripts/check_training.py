@@ -124,7 +124,8 @@ def main() -> None:
     ap.add_argument("metrics_jsonl")
     ap.add_argument("--tail", type=int, default=12, help="表尾显示行数")
     ap.add_argument("--spark", action="store_true", help="打印 ASCII 趋势图(零依赖)")
-    ap.add_argument("--plot", metavar="PNG", help="保存 matplotlib 趋势图到 PNG")
+    ap.add_argument("--plot", nargs="?", const="", metavar="PNG",
+                    help="保存 matplotlib 趋势图;不带路径时存到 metrics.jsonl 同目录的 trend.png")
     args = ap.parse_args()
 
     rows = load_rows(args.metrics_jsonl)
@@ -178,8 +179,12 @@ def main() -> None:
     if args.spark:
         print_sparks(rows)
         print()
-    if args.plot:
-        plot(rows, args.plot)
+    if args.plot is not None:
+        from pathlib import Path
+        # bare --plot: save next to metrics.jsonl (the run's output dir),
+        # never into the repo working directory
+        target = args.plot or str(Path(args.metrics_jsonl).parent / "trend.png")
+        plot(rows, target)
     if issues:
         print(f"⚠️  {len(issues)} 项需要关注: {', '.join(issues)} —— 对照 runbook §7 预案处理")
         sys.exit(1)

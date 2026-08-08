@@ -284,13 +284,19 @@ checkpoint 每 50 步存到 `runs/grpo_7b_math/`(LoRA adapter，每个 ~160MB),
 
 ### 6.4 监控（不用爬日志）
 
+> 路径规则：`metrics.jsonl`、step 检查点都落在 **启动命令的 `output_dir`** 里。
+> 下面用配置默认的 `runs/grpo_7b_math`;如果你启动时覆盖了
+> `-O train.output_dir=...`,把路径换成你的 output_dir（续训的
+> `resume_from` 同理）。
+
 ```bash
 # 尾部指标表 + 六项健康判定,训练中随时可跑
 python scripts/check_training.py runs/grpo_7b_math/metrics.jsonl
 
 # 加 ASCII 趋势图(零依赖) / PNG 六宫格(需 pip install matplotlib)
 python scripts/check_training.py runs/grpo_7b_math/metrics.jsonl --spark
-python scripts/check_training.py runs/grpo_7b_math/metrics.jsonl --plot trend.png
+# 裸 --plot 存到 metrics.jsonl 同目录(output_dir/trend.png);也可显式给路径
+python scripts/check_training.py runs/grpo_7b_math/metrics.jsonl --plot
 ```
 
 | 指标 | 健康形态 | 异常 → 预案 |
