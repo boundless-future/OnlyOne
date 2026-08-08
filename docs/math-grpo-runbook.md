@@ -253,8 +253,9 @@ onlyone train-grpo --config test_grpo.yaml \
 - GRPO:G=4,prompts_per_step=8（每步 32 条）,rewards=[math_verify, length],
   kl_beta=0.04,KL 熔断 0.5
 - 生成：max_new_tokens=512,temperature=0.9
-- 训练：lr=1e-6,300 步，save_steps=20,logging_steps=5,`keep_last_n_checkpoints: 6`
+- 训练：lr=5e-6,300 步，save_steps=20,logging_steps=5,`keep_last_n_checkpoints: 6`
   （轮转保留最近 6 个检查点，覆盖最近 120 步，宕机最多损失 20 步）
+  （lr 历史：run#1 用 1e-6,200 步仅消耗 0.04% kl 预算、reward 爬升过慢，故 ×5)
 - rollout:engine=vllm,`vllm_gpu_mem_util: 0.55`(7B bf16 基座 ~15G 必须落在
   vLLM 预算内：0.55×32G≈17G = 权重 15G + KV ~2G；训练期 vLLM sleep 不占显存）
 
@@ -274,8 +275,11 @@ onlyone train-grpo -c configs/grpo_7b_math.yaml \
 
 ```bash
 # 日志落盘带时间戳:nohup 不重定向的话,输出丢了就只剩 metrics.jsonl 可看
+# 注意:每一轮新训练必须用新的 output_dir —— 复用旧目录会把 metrics.jsonl
+# 追加混叠,趋势判定就没法看了(旧目录保留,里面的检查点留作对比)
 nohup onlyone train-grpo -c configs/grpo_7b_math.yaml \
   -O model.name_or_path=/cloud/models/Qwen2.5-7B-Instruct \
+  -O train.output_dir=runs/grpo_7b_math_run2 \
   > runs/grpo_7b_math_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 ```
 
@@ -302,6 +306,7 @@ python scripts/check_training.py runs/grpo_7b_math/metrics.jsonl --plot
 | 指标 | 健康形态 | 异常 → 预案 |
 |---|---|---|
 | `reward_mean` | 缓慢上升(0.3→0.5 量级) | 长期不动 → 难度错配,回阶段 1 |
+| `reward_L45` | 缓慢上升(难度固定桶,最干净的学习信号) | 上升而 overall 不动 → 只是抽样噪声;两者都不动 → 真没学到 |
 | `kl` | <0.1 缓涨 | 触发 0.5 熔断 → 见 6.5 |
 | `completion_chars` | 平稳 | 持续上涨超 2x → 长度黑客,收紧 length penalty |
 | `clip_frac` | 0.05~0.2 | >0.3 → lr 偏大 |

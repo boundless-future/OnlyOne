@@ -142,12 +142,24 @@ class GRPOTrainer(BaseTrainer):
             attn.append(e["attention_mask"] + [0] * pad)
             labels.append(e["labels"] + [-100] * pad)
 
+        # 按难度分桶的 reward:桶内难度构成固定,趋势不被"这一步抽到简单题"
+        # 的抽样噪声污染(overall reward_mean 洗不脱这个混淆 —— run#1 教训)。
+        buckets: dict[str, list[float]] = {"L02": [], "L3": [], "L45": []}
+        for i, meta in enumerate(metas):
+            level = meta.get("level")
+            if not isinstance(level, (int, float)):
+                continue
+            key = "L02" if level <= 2 else ("L3" if level == 3 else "L45")
+            buckets[key].extend(
+                flat_rewards[i * g.group_size:(i + 1) * g.group_size])
+
         self._last_stats = {
             "reward_mean": sum(flat_rewards) / len(flat_rewards),
             "reward_min": min(flat_rewards),
             "reward_max": max(flat_rewards),
             "n_degenerate_groups": float(n_skipped),
             "completion_chars": sum(len(r["completion"]) for r in flat_rows) / len(flat_rows),
+            **{f"reward_{k}": sum(v) / len(v) for k, v in buckets.items() if v},
         }
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),

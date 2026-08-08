@@ -144,6 +144,32 @@ def test_grpo_positive_adv_reduces_loss(um, tmp_path):
     assert loss.item() < 0
 
 
+def test_rollout_stats_bucketed_by_level(um, tmp_path, tiny_model_dir):
+    """_last_stats 必须带按难度分桶的 reward:桶内难度固定,趋势不被每步
+    抽样配比污染(overall reward_mean 洗不脱"抽到简单题"的混淆)。"""
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(tiny_model_dir)
+
+    class _Engine:
+        def generate(self, prompts, n_per_prompt, **kwargs):
+            return [["bad", "good"] for _ in prompts]
+
+    def _reward(prompt, cand, meta):
+        return meta["level"] + (0.5 if cand == "good" else 0.0)
+
+    prompts = [{"prompt": f"q{lv}", "meta": {"level": lv}} for lv in (0, 3, 5)]
+    trainer = GRPOTrainer(
+        um, _train_cfg(tmp_path), _grpo_cfg(group_size=2, prompts_per_step=3),
+        engine=_Engine(), reward_fn=_reward, prompts=prompts,
+        tokenizer=tokenizer,
+    )
+    trainer._rollout_and_build_batch()
+    stats = trainer._last_stats
+    assert stats["reward_L02"] == pytest.approx(0.25)   # level 0: [0.0, 0.5]
+    assert stats["reward_L3"] == pytest.approx(3.25)    # level 3: [3.0, 3.5]
+    assert stats["reward_L45"] == pytest.approx(5.25)   # level 5: [5.0, 5.5]
+
+
 def test_grpo_circuit_breaker(um, tmp_path):
     """KL over the breaker threshold must abort with a clear error."""
     um.snapshot_ref()

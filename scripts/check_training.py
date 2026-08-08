@@ -24,6 +24,7 @@ COLUMNS = [
     ("kl", "{:>9.4g}"),
     ("clip_frac", "{:>9.4g}"),
     ("reward_mean", "{:>11.4g}"),
+    ("reward_L45", "{:>10.4g}"),
     ("completion_chars", "{:>16.4g}"),
     ("vram_peak_gb", "{:>12.4g}"),
 ]
@@ -67,7 +68,7 @@ def sparkline(values: list[float], width: int = 60) -> str:
 
 
 def print_sparks(rows: list[dict]) -> None:
-    for key in ("reward_mean", "kl", "completion_chars", "vram_peak_gb"):
+    for key in ("reward_mean", "reward_L45", "kl", "completion_chars", "vram_peak_gb"):
         vals = [r[key] for r in rows if key in r]
         if vals:
             print(f"{key:<17}{sparkline(vals)}  min={min(vals):.4g} max={max(vals):.4g} last={vals[-1]:.4g}")
@@ -168,6 +169,16 @@ def main() -> None:
               f"前 1/3 均值 {first_m:.4f} → 后 1/3 {last_m:.4f}(应上升)", issues)
     elif rewards:
         print(f"ℹ️  reward 趋势: 仅 {len(rewards)} 行,不足以判定(当前均值 {sum(rewards)/len(rewards):.4f})")
+
+    # reward 趋势(难度固定桶 L4-5):排除"抽到简单题"的抽样噪声,
+    # 是最干净的在训学习信号(run#2 起由 trainer 记录 reward_L45)
+    l45 = [r["reward_L45"] for r in rows if "reward_L45" in r]
+    if len(l45) >= 6:
+        third = max(len(l45) // 3, 1)
+        first_l = sum(l45[:third]) / third
+        last_l = sum(l45[-third:]) / third
+        check(last_l > first_l, "reward 趋势(L4-5桶)",
+              f"前 1/3 均值 {first_l:.4f} → 后 1/3 {last_l:.4f}(难度固定,应上升)", issues)
 
     # 退化组: 持续过半说明配比失衡
     degens = [r["n_degenerate_groups"] for r in rows if "n_degenerate_groups" in r]
