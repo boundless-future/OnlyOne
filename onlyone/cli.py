@@ -91,6 +91,9 @@ def train(
         raise ValueError(f"未知算法: {cfg.algo.name}")
 
     trainer, dataloader = build(cfg, tracker=tracker)
+    # 各 builder 已冻结 ref(DPO/KTO 的 KL 锚点),此处再覆盖 policy 权重。
+    if cfg.train.resume_from:
+        trainer.load_checkpoint(cfg.train.resume_from)
     trainer.train(dataloader)
 
 
@@ -119,6 +122,10 @@ def train_grpo(
     from onlyone.trainers.grpo import build_grpo_trainer
 
     trainer = build_grpo_trainer(cfg, tracker=tracker)
+    # build_grpo_trainer 已在训练前冻结 ref(KL 锚点),此处再覆盖 policy 权重,
+    # 顺序不可调换。
+    if cfg.train.resume_from:
+        trainer.load_checkpoint(cfg.train.resume_from)
     trainer.train()
 
 

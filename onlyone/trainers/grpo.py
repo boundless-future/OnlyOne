@@ -93,6 +93,14 @@ class GRPOTrainer(BaseTrainer):
 
     # ------------------------------------------------------------ data build
 
+    def extra_state(self) -> dict:
+        # prompt 采样器的流位置:续训时不重复采样已练过的 prompt 序列。
+        return {"prompt_rng": self.rng.getstate()}
+
+    def load_extra_state(self, state: dict) -> None:
+        if "prompt_rng" in state:
+            self.rng.setstate(state["prompt_rng"])
+
     def _rollout_and_build_batch(self) -> dict[str, torch.Tensor] | None:
         """One full iteration of data production: prompts -> candidates ->
         rewards -> advantages -> tokenized batch with per-token fields."""

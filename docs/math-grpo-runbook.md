@@ -300,12 +300,22 @@ python scripts/check_training.py runs/grpo_7b_math/metrics.jsonl --plot trend.pn
 | `n_degenerate_groups` | <一半 | 持续过半 → 配比失衡 |
 | `vram_peak_gb` | <30G | 逼近上限 → `vllm_gpu_mem_util` 降 0.05 重跑 |
 
-### 6.5 异常处置
+### 6.5 异常处置与断点续训
 
 - **KL 熔断**：自动保存 checkpoint 后报错退出（这是设计行为，不是 bug）。
-  注意：当前版本 `resume_from` 配置项尚未接线，**不能断点续训**——处置是
-  降 lr(如 1e-6 → 5e-7）或升 kl_beta 后重跑；熔断前的 adapter checkpoint
-  仍可用于评估对比。
+  处置：降 lr（如 1e-6 → 5e-7）或升 kl_beta，然后从最近的 checkpoint 续训：
+  ```bash
+  onlyone train-grpo -c configs/grpo_7b_math.yaml \
+    -O model.name_or_path=/cloud/models/Qwen2.5-7B-Instruct \
+    -O train.lr=5e-7 \
+    -O train.resume_from=runs/grpo_7b_math/step250
+  ```
+  续训会恢复 policy adapter 权重、optimizer/scheduler 状态、global_step 和
+  prompt 采样流位置；ref 锚点保持为起跑时的初始策略（实现上先冻结 ref、
+  再加载续训权重，顺序由 CLI 保证）。检查点轮转默认
+  `keep_last_n_checkpoints: 6`——只留最近 6 个 step 目录，`final` 永远保留。
+- **pod 宕机/被回收**：同上用最新保留的 step 目录续训，最多损失
+  `save_steps`(50）步。
 - **OOM**：先把 `vllm_gpu_mem_util` 降 0.05 重跑；仍 OOM 则
   `prompts_per_step` 8→4。
 - **退出码 139**：上游 vllm#16993 退出时 double-free,checkpoint 已落盘，忽略。

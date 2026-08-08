@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import random
+import shutil
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -18,7 +19,7 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import get_cosine_schedule_with_warmup
 
-from onlyone.models.unified import UnifiedModel
+from onlyone.models.unified import DEFAULT_ADAPTER, UnifiedModel
 from onlyone.utils.config import TrainConfig
 from onlyone.utils.logging import Tracker
 from onlyone.utils.memory import peak_vram_gb
@@ -128,8 +129,73 @@ class BaseTrainer(ABC):
             "global_step": self.global_step,
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
+            **self.extra_state(),
         }
         torch.save(state, os.path.join(path, "trainer_state.pt"))
         with open(os.path.join(path, "train_cfg.json"), "w", encoding="utf-8") as f:
             json.dump(self.cfg.model_dump(), f, indent=2, ensure_ascii=False)
         logger.info("checkpoint saved: %s", path)
+        if not final:
+            self._rotate_checkpoints()
+
+    def _rotate_checkpoints(self) -> None:
+        """Keep only the newest `keep_last_n_checkpoints` step dirs (final is
+        never rotated). Disabled when the config value is unset/0."""
+        keep = self.cfg.keep_last_n_checkpoints
+        if not keep:
+            return
+        out = Path(self.cfg.output_dir)
+        step_dirs = sorted(
+            (d for d in out.iterdir()
+             if d.is_dir() and d.name.startswith("step") and d.name[4:].isdigit()),
+            key=lambda d: int(d.name[4:]),
+        )
+        for d in step_dirs[: max(len(step_dirs) - keep, 0)]:
+            shutil.rmtree(d)
+            logger.info("checkpoint rotated out: %s", d)
+
+    def load_checkpoint(self, path: str) -> None:
+        """Resume from a save_checkpoint directory (weights + trainer state).
+
+        MUST be called after the builder froze the reference adapter
+        (snapshot_ref): the ref anchor stays at the run's starting policy,
+        and only the policy adapter is overwritten with trained weights.
+        """
+        from safetensors.torch import load_file
+
+        adapter_file = os.path.join(path, "adapter_model.safetensors")
+        if os.path.exists(adapter_file):
+            # peft save strips the adapter name from keys; the official loader
+            # maps them back onto adapter_name.
+            from peft import set_peft_model_state_dict
+            set_peft_model_state_dict(
+                self.model, load_file(adapter_file), adapter_name=DEFAULT_ADAPTER
+            )
+        else:
+            shards = sorted(Path(path).glob("model*.safetensors"))
+            if not shards:
+                raise FileNotFoundError(f"checkpoint 里找不到权重文件: {path}")
+            sd: dict = {}
+            for shard in shards:
+                sd.update(load_file(str(shard)))
+            # strict=False: tied weights (e.g. Qwen lm_head) are deduplicated
+            # on save and re-tied by the model itself.
+            self.model.load_state_dict(sd, strict=False)
+
+        state = torch.load(
+            os.path.join(path, "trainer_state.pt"),
+            map_location=self.device,
+            weights_only=False,  # own checkpoint, trusted; holds RNG tuples
+        )
+        self.optimizer.load_state_dict(state["optimizer"])
+        self.scheduler.load_state_dict(state["scheduler"])
+        self.global_step = state["global_step"]
+        self.load_extra_state(state)
+        logger.info("resumed from %s (global_step=%d)", path, self.global_step)
+
+    def extra_state(self) -> dict:
+        """Subclass-specific state persisted into trainer_state.pt."""
+        return {}
+
+    def load_extra_state(self, state: dict) -> None:
+        """Restore what extra_state() saved."""

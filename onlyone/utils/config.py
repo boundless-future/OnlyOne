@@ -71,6 +71,9 @@ class TrainConfig(_Base):
     save_steps: int = 500
     eval_steps: Optional[int] = None
     resume_from: Optional[str] = None
+    # None = 全部保留;设为 N 则只保留最近 N 个 step 检查点(最旧的自动删除,
+    # final 永远保留)。LoRA 检查点 ~160MB/个,300 步 + save_steps=50 建议 6。
+    keep_last_n_checkpoints: Optional[int] = None
 
     log_with: Literal["none", "wandb", "tensorboard"] = "none"
     run_name: Optional[str] = None

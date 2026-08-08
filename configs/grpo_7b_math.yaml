@@ -30,6 +30,7 @@ train:
   gradient_checkpointing: true
   logging_steps: 5
   save_steps: 50
+  keep_last_n_checkpoints: 6   # 只留最近 6 个 step 检查点(adapter ~160MB/个),final 永远保留
   seed: 42
   log_with: none              # 服务器 wandb 未登录;登录后可改 wandb
   run_name: grpo-7b-math
