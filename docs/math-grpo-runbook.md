@@ -159,7 +159,7 @@ raft:
 ### 3.2 执行与分析
 
 ```bash
-nohup onlyone flywheel --config raft_probe.yaml > runs/raft_probe_7b.log 2>&1 &
+nohup onlyone flywheel --config raft_probe.yaml > runs/raft_probe_7b_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 
 # 跑完后分析
 python scripts/analyze_probe.py runs/raft_probe_7b/round_0/scores.jsonl
@@ -253,7 +253,8 @@ onlyone train-grpo --config test_grpo.yaml \
 - GRPO:G=4,prompts_per_step=8（每步 32 条）,rewards=[math_verify, length],
   kl_beta=0.04,KL 熔断 0.5
 - 生成：max_new_tokens=512,temperature=0.9
-- 训练：lr=1e-6,300 步，save_steps=50,logging_steps=5
+- 训练：lr=1e-6,300 步，save_steps=20,logging_steps=5,`keep_last_n_checkpoints: 6`
+  （轮转保留最近 6 个检查点，覆盖最近 120 步，宕机最多损失 20 步）
 - rollout:engine=vllm,`vllm_gpu_mem_util: 0.55`(7B bf16 基座 ~15G 必须落在
   vLLM 预算内：0.55×32G≈17G = 权重 15G + KV ~2G；训练期 vLLM sleep 不占显存）
 
@@ -272,9 +273,10 @@ onlyone train-grpo -c configs/grpo_7b_math.yaml \
 ### 6.3 正式开跑
 
 ```bash
+# 日志落盘带时间戳:nohup 不重定向的话,输出丢了就只剩 metrics.jsonl 可看
 nohup onlyone train-grpo -c configs/grpo_7b_math.yaml \
   -O model.name_or_path=/cloud/models/Qwen2.5-7B-Instruct \
-  > runs/grpo_7b_math.log 2>&1 &
+  > runs/grpo_7b_math_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 ```
 
 checkpoint 每 50 步存到 `runs/grpo_7b_math/`(LoRA adapter，每个 ~160MB),
@@ -315,7 +317,7 @@ python scripts/check_training.py runs/grpo_7b_math/metrics.jsonl --plot trend.pn
   再加载续训权重，顺序由 CLI 保证）。检查点轮转默认
   `keep_last_n_checkpoints: 6`——只留最近 6 个 step 目录，`final` 永远保留。
 - **pod 宕机/被回收**：同上用最新保留的 step 目录续训，最多损失
-  `save_steps`(50）步。
+  `save_steps`(20）步。
 - **OOM**：先把 `vllm_gpu_mem_util` 降 0.05 重跑；仍 OOM 则
   `prompts_per_step` 8→4。
 - **退出码 139**：上游 vllm#16993 退出时 double-free,checkpoint 已落盘，忽略。
