@@ -1,8 +1,8 @@
-# OnlyOne 数学 GRPO 操作手册（环境准备 → 数据配比定稿）
+# OnlyOne 数学 GRPO 操作手册（环境准备 → GRPO 主训练）
 
 > 适用对象：第一次接手本项目的使用者。
-> 范围：从空服务器到完成阶段 1 难度探测、定稿 GRPO 训练数据配比。
-> 后续阶段（GRPO 主训练、评估）见 `qwen25_7b_math_grpo_plan.md` §6~§7（待补充进本文档）。
+> 范围：从空服务器到 GRPO 主训练开跑与监控（阶段 0~3）。
+> 评估阶段（MATH-500 / GSM8K 对比）待补充。
 > 目标硬件：单卡 32G（RTX 5090 实测）；参考实现分支：`feat/7b-math-grpo`。
 
 ---
@@ -10,8 +10,8 @@
 ## 0. 总览
 
 ```
-环境准备 ──► 阶段0 数据准备 ──► 阶段1 难度探测 ──► 配比定稿
- (30 min)     (CPU, 10 min)      (GPU 推理 1~2h)    (1 条命令)
+环境准备 ──► 阶段0 数据准备 ──► 阶段1 难度探测 ──► 配比定稿 ──► 阶段3 GRPO 主训练
+ (30 min)     (CPU, 10 min)      (GPU 推理 1~2h)    (1 条命令)     (单卡 ~4.2h)
 ```
 
 核心原则：**GRPO 的训练信号来自组内 reward 方差**。7B-Instruct 在 GSM8K 上太强
@@ -69,8 +69,10 @@ modelscope download --model Qwen/Qwen2.5-1.5B-Instruct --local_dir /cloud/models
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| 训练中途 segfault | vLLM sleep 状态下 load_weights（已在 `a729403` 修复） | 拉最新分支即可 |
+| 训练中途 segfault | vLLM sleep 状态下变更引擎（已在 `a729403` 修复：wake 先行） | 拉最新分支即可 |
 | `'LLMEngine' object has no attribute 'model_executor'` | vLLM ≥0.10 默认 V1 engine | 代码已强制 `VLLM_USE_V1=0`，无需操作 |
+| `wake_up` 时 cuMem OOM | PyTorch 缓存块挡住物理映射（已在 `f9dccf5` 修复） | 拉最新分支即可 |
+| 训练 forward OOM(7B 全词表 logits) | fp32 logits 峰值 + autograd 保留（已在 `8b2ac5e`/`a3d4fa4` 修复） | 拉最新分支即可 |
 | 训练结束后退出码 139 | 上游 bug vllm#16993，退出时 double-free | 不影响训练结果，可忽略 |
 | flash_attn 未安装 | sm_120 编译成本高 | 配置用 `attn_implementation: sdpa`，不影响正确性 |
 
@@ -102,7 +104,7 @@ level 0 = GSM8K，1~5 = MATH 难度。
 
 ```bash
 python -m pytest tests -q
-# 预期: 83 passed
+# 预期: 87 passed
 ```
 
 ---
@@ -235,11 +237,97 @@ onlyone train-grpo --config test_grpo.yaml \
 > vLLM 常驻 bf16 基座，每步通过 `add_lora`/`remove_lora` 热插拔（秒级）。
 > 因此 vLLM 引擎要求 `use_lora: true`；全量训练请用 `engine: hf`。
 
+> 指标观测：每个记录步都会追加一行 JSON 到 `{output_dir}/metrics.jsonl`
+> （与 wandb/tb 后端无关，零依赖）。随时用
+> `python scripts/check_training.py <output_dir>/metrics.jsonl`
+> 看尾部指标表 + 健康判定（kl / clip_frac / 长度 / 显存 / reward 趋势 / 退化组）。
+
+---
+
+## 6. 阶段 3：GRPO 主训练（单卡 32G，约 4.2 小时）
+
+### 6.1 配置：`configs/grpo_7b_math.yaml`
+
+- 模型：Qwen2.5-7B-Instruct,QLoRA 4bit + LoRA r=16/α=32,`sdpa`
+- 数据：`prompts_mix.jsonl`(4000 条，§4 配比）
+- GRPO:G=4,prompts_per_step=8（每步 32 条）,rewards=[math_verify, length],
+  kl_beta=0.04,KL 熔断 0.5
+- 生成：max_new_tokens=512,temperature=0.9
+- 训练：lr=1e-6,300 步，save_steps=50,logging_steps=5
+- rollout:engine=vllm,`vllm_gpu_mem_util: 0.55`(7B bf16 基座 ~15G 必须落在
+  vLLM 预算内：0.55×32G≈17G = 权重 15G + KV ~2G；训练期 vLLM sleep 不占显存）
+
+### 6.2 先 3 步冒烟（必做）
+
+```bash
+onlyone train-grpo -c configs/grpo_7b_math.yaml \
+  -O model.name_or_path=/cloud/models/Qwen2.5-7B-Instruct \
+  -O train.max_steps=3 -O train.logging_steps=1 \
+  -O train.output_dir=runs/grpo_7b_smoke
+```
+
+通过标准：3 步无错误完成、逐步指标打出、`vram_peak_gb` < 30、
+`n_degenerate_groups` 为 0 或接近 0。实测（2026-08-08）约 50s/step。
+
+### 6.3 正式开跑
+
+```bash
+nohup onlyone train-grpo -c configs/grpo_7b_math.yaml \
+  -O model.name_or_path=/cloud/models/Qwen2.5-7B-Instruct \
+  > runs/grpo_7b_math.log 2>&1 &
+```
+
+checkpoint 每 50 步存到 `runs/grpo_7b_math/`(LoRA adapter，每个 ~160MB),
+指标每 5 步追加到 `runs/grpo_7b_math/metrics.jsonl`。
+
+### 6.4 监控（不用爬日志）
+
+```bash
+# 尾部指标表 + 六项健康判定,训练中随时可跑
+python scripts/check_training.py runs/grpo_7b_math/metrics.jsonl
+
+# 加 ASCII 趋势图(零依赖) / PNG 六宫格(需 pip install matplotlib)
+python scripts/check_training.py runs/grpo_7b_math/metrics.jsonl --spark
+python scripts/check_training.py runs/grpo_7b_math/metrics.jsonl --plot trend.png
+```
+
+| 指标 | 健康形态 | 异常 → 预案 |
+|---|---|---|
+| `reward_mean` | 缓慢上升(0.3→0.5 量级) | 长期不动 → 难度错配,回阶段 1 |
+| `kl` | <0.1 缓涨 | 触发 0.5 熔断 → 见 6.5 |
+| `completion_chars` | 平稳 | 持续上涨超 2x → 长度黑客,收紧 length penalty |
+| `clip_frac` | 0.05~0.2 | >0.3 → lr 偏大 |
+| `n_degenerate_groups` | <一半 | 持续过半 → 配比失衡 |
+| `vram_peak_gb` | <30G | 逼近上限 → `vllm_gpu_mem_util` 降 0.05 重跑 |
+
+### 6.5 异常处置
+
+- **KL 熔断**：自动保存 checkpoint 后报错退出（这是设计行为，不是 bug）。
+  注意：当前版本 `resume_from` 配置项尚未接线，**不能断点续训**——处置是
+  降 lr(如 1e-6 → 5e-7）或升 kl_beta 后重跑；熔断前的 adapter checkpoint
+  仍可用于评估对比。
+- **OOM**：先把 `vllm_gpu_mem_util` 降 0.05 重跑；仍 OOM 则
+  `prompts_per_step` 8→4。
+- **退出码 139**：上游 vllm#16993 退出时 double-free,checkpoint 已落盘，忽略。
+
+### 6.6 单卡共存架构（排障背景知识）
+
+训练侧 4bit QLoRA 模型与 vLLM(bf16 基座）共用一张卡，严格交替：
+
+```
+sync: 存 policy adapter(~160MB)→ wake_up() → add_lora(新id)/remove_lora(旧id)
+rollout: generate(lora_request=policy) → sleep()(权重卸载到 CPU,释放 ~16G)
+train: 前向/反向/优化器(此时 vLLM 不占显存)
+```
+
+两条铁律（都是 segfault/OOM 换来的）:**任何引擎变更必须先 `wake_up()`**;
+**`wake_up()` 前必须 `torch.cuda.empty_cache()`** 把 PyTorch 缓存块还给驱动。
+
 ---
 
 ## 下一步（本文档待续）
 
-- 阶段 3：GRPO 主训练配置（`configs/grpo_7b_math.yaml`，QLoRA 4bit + vLLM）
-- 阶段 4：MATH-500 / GSM8K 全量对比评估
+- 阶段 4：MATH-500 / GSM8K 全量对比评估（验收标准：MATH-500 相对起点 +5pt,
+  GSM8K 不低于起点 2pt)
 
-详见 `qwen25_7b_math_grpo_plan.md` §6~§7。
+详见 `qwen25_7b_math_grpo_plan.md` §7。
