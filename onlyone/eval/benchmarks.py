@@ -20,7 +20,31 @@ import torch
 
 from onlyone.data.templates import get_template
 
+
 logger = logging.getLogger("onlyone")
+_BOXED_START_RE = re.compile(r"\\boxed\s*\{")
+_BOXED_BARE_RE = re.compile(r"\\boxed\s+([^\s$.,;{}]+)")
+
+
+def extract_boxed(text: str) -> Optional[str]:
+    """Extract the contents of the last balanced boxed expression."""
+    boxed_values: list[tuple[int, str]] = []
+    for match in _BOXED_START_RE.finditer(text):
+        start = match.end()
+        depth = 1
+        for index in range(start, len(text)):
+            if text[index] == "{":
+                depth += 1
+            elif text[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    boxed_values.append((match.start(), text[start:index].strip()))
+                    break
+    boxed_values.extend(
+        (match.start(), match.group(1)) for match in _BOXED_BARE_RE.finditer(text)
+    )
+    return max(boxed_values)[1] if boxed_values else None
+
 
 _NUMBER_RE = re.compile(r"-?\d[\d,]*\.?\d*")
 _ANSWER_RE = re.compile(r"####\s*(-?\d[\d,]*\.?\d*)")
@@ -35,11 +59,14 @@ def extract_gold(answer_field: str) -> Optional[str]:
 
 
 def extract_prediction(text: str) -> Optional[str]:
-    """Extract the predicted answer: last number after '####' if present,
-    else the last number in the text."""
+    """Extract a prediction, preferring ####, then boxed, then a number."""
     m = _ANSWER_RE.search(text)
     if m:
         return m.group(1).replace(",", "")
+    boxed = extract_boxed(text)
+    if boxed is not None:
+        return boxed
+
     numbers = _NUMBER_RE.findall(text)
     if not numbers:
         return None

@@ -26,6 +26,7 @@ flash = ["flash-attn>=2.6"]
 vllm = ["vllm>=0.9"]
 logging = ["wandb>=0.17"]
 eval = ["numpy>=1.26"]
+math = ["math-verify>=0.7"]
 dev = ["pytest>=8.0", "pytest-cov"]
 
 [project.scripts]

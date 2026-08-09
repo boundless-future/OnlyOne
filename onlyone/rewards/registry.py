@@ -11,11 +11,13 @@ from __future__ import annotations
 from onlyone.rewards.base import RewardFn, combine
 from onlyone.rewards.rules import (
     json_format_reward, length_penalty_reward, math_answer_reward,
+    math_verify_reward,
     regex_format_reward,
 )
 
 _REGISTRY: dict[str, RewardFn] = {
     "math_answer": math_answer_reward,
+    "math_verify": math_verify_reward,
     "json_format": json_format_reward,
     "length": length_penalty_reward(),
     "think_tag": regex_format_reward(r"<think>.*</think>"),

@@ -12,13 +12,66 @@ from onlyone.utils.logging import Tracker, setup_console_logging
 app = typer.Typer(help="OnlyOne — 单卡大模型对齐全流程框架")
 
 
-@app.command()
-def train(config: str = typer.Option(..., "--config", "-c", help="YAML 配置路径")):
-    """Run a training job; cfg.algo.name selects the trainer."""
-    from onlyone.utils.config import load_config
+def _parse_overrides(overrides: Optional[list[str]]) -> dict:
+    """Convert 'key=value' or 'key.subkey=value' strings into a nested dict."""
+    result: dict = {}
+    if not overrides:
+        return result
+    for item in overrides:
+        if "=" not in item:
+            raise typer.BadParameter(f"覆盖项必须是 key=value 格式: {item}")
+        key, value = item.split("=", 1)
+        *parts, last = key.split(".")
+        node = result
+        for part in parts:
+            node = node.setdefault(part, {})
+        # Try JSON-style literals (bool/null/numbers/lists), fall back to string.
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            parsed = value
+        node[last] = parsed
+    return result
 
+
+def _apply_overrides(cfg: dict, overrides: dict) -> dict:
+    """Deep merge override dict into config dict."""
+    for key, value in overrides.items():
+        if (
+            key in cfg
+            and isinstance(cfg[key], dict)
+            and isinstance(value, dict)
+        ):
+            _apply_overrides(cfg[key], value)
+        else:
+            cfg[key] = value
+    return cfg
+
+
+def _load_config_with_overrides(path: str, overrides: Optional[list[str]]):
+    """Load YAML and apply CLI overrides, then re-validate."""
+    from onlyone.utils.config import TrainJobConfig, load_config
+
+    cfg = load_config(path)
+    if not overrides:
+        return cfg
+    raw = cfg.model_dump()
+    override_dict = _parse_overrides(overrides)
+    merged = _apply_overrides(raw, override_dict)
+    return TrainJobConfig.model_validate(merged)
+
+
+@app.command()
+def train(
+    config: str = typer.Option(..., "--config", "-c", help="YAML 配置路径"),
+    override: Optional[list[str]] = typer.Option(
+        None, "--override", "-O",
+        help="覆盖 YAML 配置项,格式 key=value 或 key.subkey=value;可多次使用",
+    ),
+):
+    """Run a training job; cfg.algo.name selects the trainer."""
     setup_console_logging()
-    cfg = load_config(config)
+    cfg = _load_config_with_overrides(config, override)
     tracker = Tracker(
         log_with=cfg.train.log_with,
         run_name=cfg.train.run_name,
@@ -38,16 +91,23 @@ def train(config: str = typer.Option(..., "--config", "-c", help="YAML 配置路
         raise ValueError(f"未知算法: {cfg.algo.name}")
 
     trainer, dataloader = build(cfg, tracker=tracker)
+    # 各 builder 已冻结 ref(DPO/KTO 的 KL 锚点),此处再覆盖 policy 权重。
+    if cfg.train.resume_from:
+        trainer.load_checkpoint(cfg.train.resume_from)
     trainer.train(dataloader)
 
 
 @app.command()
-def train_grpo(config: str = typer.Option(..., "--config", "-c", help="YAML 配置路径(需含 grpo 段)")):
+def train_grpo(
+    config: str = typer.Option(..., "--config", "-c", help="YAML 配置路径(需含 grpo 段)"),
+    override: Optional[list[str]] = typer.Option(
+        None, "--override", "-O",
+        help="覆盖 YAML 配置项,格式 key=value 或 key.subkey=value;可多次使用",
+    ),
+):
     """Run GRPO online RL (self-generating data; no static dataloader)."""
-    from onlyone.utils.config import load_config
-
     setup_console_logging()
-    cfg = load_config(config)
+    cfg = _load_config_with_overrides(config, override)
     if cfg.grpo is None:
         raise ValueError("配置缺少 grpo 段")
     if cfg.algo.name != "grpo":
@@ -62,17 +122,26 @@ def train_grpo(config: str = typer.Option(..., "--config", "-c", help="YAML 配�
     from onlyone.trainers.grpo import build_grpo_trainer
 
     trainer = build_grpo_trainer(cfg, tracker=tracker)
+    # build_grpo_trainer 已在训练前冻结 ref(KL 锚点),此处再覆盖 policy 权重,
+    # 顺序不可调换。
+    if cfg.train.resume_from:
+        trainer.load_checkpoint(cfg.train.resume_from)
     trainer.train()
 
 
 @app.command()
-def flywheel(config: str = typer.Option(..., "--config", "-c", help="YAML 配置路径(需含 raft 段)")):
+def flywheel(
+    config: str = typer.Option(..., "--config", "-c", help="YAML 配置路径(需含 raft 段)"),
+    override: Optional[list[str]] = typer.Option(
+        None, "--override", "-O",
+        help="覆盖 YAML 配置项,格式 key=value 或 key.subkey=value;可多次使用",
+    ),
+):
     """Run the RAFT data flywheel: rollout -> filter -> SFT retrain, N rounds."""
     from onlyone.flywheel.raft import run_flywheel
-    from onlyone.utils.config import load_config
 
     setup_console_logging()
-    cfg = load_config(config)
+    cfg = _load_config_with_overrides(config, override)
     if cfg.raft is None:
         raise ValueError("配置缺少 raft 段,无法运行 flywheel")
     tracker = Tracker(

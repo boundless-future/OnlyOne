@@ -7,6 +7,7 @@ documented range so they compose predictably under `combine`.
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any
 
@@ -25,6 +26,34 @@ def math_answer_reward(prompt: str, response: str, meta: dict[str, Any]) -> floa
         return 0.0
     pred = extract_prediction(response)
     return 1.0 if answers_match(pred, str(gold)) else 0.0
+
+
+def math_verify_reward(prompt: str, response: str, meta: dict[str, Any]) -> float:
+    """+1 when math_verify considers the prediction equivalent to gold."""
+    try:
+        from math_verify import parse, verify
+    except ImportError as exc:
+        raise ImportError(
+            "math_verify reward requires the optional dependency; "
+            "install it with pip install -e '.[math]'"
+        ) from exc
+
+    gold = meta.get("gold")
+    prediction = extract_prediction(response)
+    if gold is None or prediction is None:
+        return 0.0
+    try:
+        parse_kwargs = {"parsing_timeout": None} if os.name == "nt" else {}
+        verify_kwargs = {"timeout_seconds": None} if os.name == "nt" else {}
+        gold_parsed = parse("The answer is $" + str(gold) + "$", **parse_kwargs)
+        prediction_parsed = parse(
+            "The answer is $" + str(prediction) + "$", **parse_kwargs
+        )
+        if not gold_parsed or not prediction_parsed:
+            return 0.0
+        return 1.0 if verify(gold_parsed, prediction_parsed, **verify_kwargs) else 0.0
+    except Exception:
+        return 0.0
 
 
 def json_format_reward(prompt: str, response: str, meta: dict[str, Any]) -> float:

@@ -36,6 +36,50 @@ def test_logps_matches_hand_computed(um):
     assert torch.allclose(got, want, atol=1e-5), f"max diff {(got - want).abs().max()}"
 
 
+def test_token_logps_chunking_is_numerically_identical(um):
+    """Chunked forward (memory fix for 7B full-vocab logits) must match the
+    unchunked result exactly — same kernels, just fewer rows per call."""
+    input_ids, attention_mask, labels = make_batch()
+    with torch.no_grad():
+        full_logps, full_counts = um.token_logps(
+            input_ids, attention_mask, labels, logps_chunk_size=10_000
+        )
+        chunked_logps, chunked_counts = um.token_logps(
+            input_ids, attention_mask, labels, logps_chunk_size=1
+        )
+    assert torch.allclose(chunked_logps, full_logps, atol=1e-6), (
+        f"max diff {(chunked_logps - full_logps).abs().max()}"
+    )
+    assert torch.equal(chunked_counts, full_counts)
+
+
+def test_token_logps_checkpointed_training_path_matches_plain(um):
+    """The training path wraps each chunk in torch.utils.checkpoint to avoid
+    retaining fp32 log_softmax outputs (B*T*V*4 total, the 7B smoke #4 OOM).
+    Values and gradients must match a plain uncheckpointed forward exactly."""
+    input_ids, attention_mask, labels = make_batch()
+    um.model.train()  # activates the checkpointed path
+
+    token_logps, counts = um.token_logps(input_ids, attention_mask, labels)
+    token_logps.sum().backward()
+    grads = {n: p.grad.clone() for n, p in um.model.named_parameters()
+             if p.grad is not None}
+    assert grads, "checkpointed path produced no gradients"
+    um.model.zero_grad()
+
+    logits = um.model(input_ids=input_ids, attention_mask=attention_mask).logits[:, :-1, :]
+    shifted = labels[:, 1:]
+    mask = shifted != -100
+    logp = F.log_softmax(logits.float(), dim=-1)
+    ref = torch.gather(logp, -1, shifted.clamp(min=0).unsqueeze(-1)).squeeze(-1) * mask
+    ref.sum().backward()
+
+    assert torch.allclose(token_logps.detach(), ref.detach(), atol=1e-6)
+    for n, p in um.model.named_parameters():
+        if p.grad is not None:
+            assert torch.allclose(grads[n], p.grad, atol=1e-6), f"grad mismatch: {n}"
+
+
 def test_logps_all_masked_is_zero(um):
     input_ids, attention_mask, labels = make_batch()
     labels[:] = -100

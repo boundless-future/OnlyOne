@@ -71,6 +71,9 @@ class TrainConfig(_Base):
     save_steps: int = 500
     eval_steps: Optional[int] = None
     resume_from: Optional[str] = None
+    # None = 全部保留;设为 N 则只保留最近 N 个 step 检查点(最旧的自动删除,
+    # final 永远保留)。LoRA 检查点 ~160MB/个,留 6 个约 1G。
+    keep_last_n_checkpoints: Optional[int] = None
 
     log_with: Literal["none", "wandb", "tensorboard"] = "none"
     run_name: Optional[str] = None
@@ -115,6 +118,8 @@ class RaftConfig(_Base):
     output_dir: str = "runs/raft"
     train_sft: bool = True      # retrain on filtered data each round
     make_preference: bool = True  # also emit best/worst DPO pairs
+    engine: Literal["hf", "vllm"] = "hf"  # vllm requires Linux + onlyone[vllm]
+    vllm_gpu_mem_util: float = 0.5        # probe 模式无训练共存,可比 GRPO 高
 
 
 class GRPOConfig(_Base):
