@@ -1,8 +1,7 @@
-# OnlyOne 数学 GRPO 操作手册（环境准备 → GRPO 主训练）
+# OnlyOne 数学 GRPO 操作手册（环境准备 → GRPO 主训练 → 评估验收）
 
 > 适用对象：第一次接手本项目的使用者。
-> 范围：从空服务器到 GRPO 主训练开跑与监控（阶段 0~3）。
-> 评估阶段（MATH-500 / GSM8K 对比）待补充。
+> 范围：从空服务器到 GRPO 主训练、监控与阶段 4 评估验收（阶段 0~4）。
 > 目标硬件：单卡 32G（RTX 5090 实测）；参考实现分支：`feat/7b-math-grpo`。
 
 ---
@@ -348,9 +347,39 @@ train: 前向/反向/优化器(此时 vLLM 不占显存)
 
 ---
 
-## 下一步（本文档待续）
+## 7. 阶段 4：固定题集评估（验收）
 
-- 阶段 4：MATH-500 / GSM8K 全量对比评估（验收标准：MATH-500 相对起点 +5pt,
-  GSM8K 不低于起点 2pt)
+训练内 reward 混有 length 成分（completion 变短也挣分），只有固定题集 +
+纯正确率是终裁。用 `scripts/eval_math.py`：同一个 vLLM 实例里 base 与
+adapter 先后生成（解码条件严格一致），贪婪 pass@1，只跑 math_verify:
 
-详见 `qwen25_7b_math_grpo_plan.md` §7。
+```bash
+# MATH-500(base + adapter 各一遍,500 题约 15~25 分钟)
+nohup python scripts/eval_math.py \
+  --model /cloud/models/Qwen2.5-7B-Instruct \
+  --adapter <output_dir>/step40 \
+  --data data/math/math500_test.jsonl \
+  --out <output_dir>/eval_step40_math500.json \
+  > eval_math500_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+
+# GSM8K held-out 回退检查(1319 题)
+nohup python scripts/eval_math.py \
+  --model /cloud/models/Qwen2.5-7B-Instruct \
+  --adapter <output_dir>/step40 \
+  --data data/math/gsm8k_test.jsonl \
+  --out <output_dir>/eval_step40_gsm8k.json \
+  > eval_gsm8k_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+```
+
+输出 overall + per-level 的 base/adapter 正确率与平均长度对照表；
+`--limit 20` 可先快速自检链路。验收判读：
+
+- **MATH-500 Δ ≥ +5pt** 为主要验收线
+- **GSM8K Δ ≥ −2pt** 为回退线；掉得接近线说明 completion 被压得过短
+  （简单题跳步骤），换更早的检查点重评（早停点常优于最终点——实测
+  step40 全面优于 step60)
+- `adapter_chars` 显著低于 base 且正确率上升 = 高效推理（好）；正确率
+  不涨只变短 = 长度塑形刷分（坏）
+
+参考结果（2026-08-08,lr=1.6e-4 run,step40):MATH-500 +13.0pt、
+GSM8K −0.8pt，验收通过。详见笔记 `qwen25_7b_math_grpo_experiments.md`。
